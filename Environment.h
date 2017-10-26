@@ -19,8 +19,7 @@ class StackFrame {
    /// The current stmt
    Stmt * mPC;
 public:
-   StackFrame() : mVars(), mExprs(), mPC() {
-   }
+   StackFrame() : mVars(), mExprs(), mPC() {}
 
    void bindDecl(Decl* decl, int val) {
       mVars[decl] = val;
@@ -62,7 +61,6 @@ class Environment {
    FunctionDecl * mMalloc;
    FunctionDecl * mInput;
    FunctionDecl * mOutput;
-
    FunctionDecl * mEntry;
 public:
    /// Get the declartions to the built-in functions
@@ -108,7 +106,7 @@ public:
 
    //unary operators
    void unaryOp(UnaryOperator *uop) {
-     Opcode op = uop->getOpcode();
+     UnaryOperator::Opcode op = uop->getOpcode();
      Expr *expr = uop->getSubExpr();
      int value = 0;
      if (IntegerLiteral *num = dyn_cast<IntegerLiteral>(expr)) {
@@ -124,97 +122,62 @@ public:
 
    /// !TODO Support comparison operation
    //binary operators
-   void binop(BinaryOperator *bop) {
+   void binaryOp(BinaryOperator *bop) {
 	   Expr * left = bop->getLHS();
 	   Expr * right = bop->getRHS();
+     int op1 = -1, op2 = 0;
+     //the left expr value
+     if (IntegerLiteral *num = dyn_cast<IntegerLiteral>(left)) {
+       op1 = num->getValue().getSExtValue();
+     }
+     else {
+       op1 = mStack.back().getStmtVal(left);
+     }
+     //the right expr value
+     if (IntegerLiteral *num = dyn_cast<IntegerLiteral>(right)) {
+       op2 = num->getValue().getSExtValue();
+     }
+     else {
+       op2 = mStack.back().getStmtVal(right);
+     }
      //assignment
-	   //if (bop->isAssignmentOp()) 
      if (bop->getOpcodeStr() == "=") {
-       int value = 0;
-       if(IntegerLiteral *num = dyn_cast<IntegerLiteral>(right)) {
-         value = num->getValue().getSExtValue(); 
-       }
-       else {
-         value = mStack.back().getStmtVal(right);
-       }
-		   mStack.back().bindStmt(left, value);
+		   mStack.back().bindStmt(left, op2);
        //if the left is a var ref
 		   if (DeclRefExpr * declexpr = dyn_cast<DeclRefExpr>(left)) {
 			   Decl * decl = declexpr->getFoundDecl();
-			   mStack.back().bindDecl(decl, value);
+			   mStack.back().bindDecl(decl, op2);
 		   }
 	   }
      //add
      else if (bop->getOpcodeStr() == "+") {
-       Expr *left = bop->getLHS();
-       Expr *right = bop->getRHS();
-       int op1 = mStack.back().getStmtVal(left);
-       int op2 = mStack.back().getStmtVal(right);
-       int result = op1 + op2;
-       mStack.back().bindStmt(bop, result);
-
+       mStack.back().bindStmt(bop, op1 + op2);
      }
      //sub
      else if (bop->getOpcodeStr() == "-") {
-       Expr *left = bop->getLHS();
-       Expr *right = bop->getRHS();
-       int op1 = 0, op2 = 0;
-       if (IntegerLiteral *num = dyn_cast<IntegerLiteral>(left)) {
-         llvm::outs() << "left literal\n";
-         op1 = num->getValue().getSExtValue();
-       }
-       else {
-         op1 = mStack.back().getStmtVal(left);
-       }
-       if (IntegerLiteral *num = dyn_cast<IntegerLiteral>(right)) {
-         llvm::outs() << "right literal\n";
-         op2 = num->getValue().getSExtValue();
-       }
-       else
-         op2 = mStack.back().getStmtVal(right);
-       int result = op1 - op2;
-       mStack.back().bindStmt(bop, result);
+       mStack.back().bindStmt(bop, op1 -op2);
      }
      //mutiple
      else if (bop->getOpcodeStr() == "*") {
-       Expr *left = bop->getLHS();
-       Expr *right = bop->getRHS();
-       int op1 = mStack.back().getStmtVal(left);
-       int op2 = mStack.back().getStmtVal(right);
-       int result = op1 * op2;
-       mStack.back().bindStmt(bop, result);
+       mStack.back().bindStmt(bop, op1 * op2);
      }
      //equal
-     else if (bop.isComparisonOp) {
-       Expr *left = bop->getLHS();
-       Expr *right = bop->getRHS();
-       int leftVal = -1, rightVal = 1;
-       //left is a IntegerLiteral
-       if (IntegerLiteral *conLeft = dyn_cast<IntegerLiteral>(left)) {
-         leftVal = conLeft->getValue().getSExtValue();
-       }
-       else {
-         //@why can not use getDeclVal(), ?????
-         leftVal = mStack.back().getStmtVal(left);
-         llvm::outs() << "left value:: " << leftVal;
-       }
-       //right is a  IntegerLiteral
-       if (IntegerLiteral *conRight = dyn_cast<IntegerLiteral>(right)) {
-         rightVal = conRight->getValue().getSExtValue();
-       }
-       else {
-         rightVal = mStack.back().getStmtVal(right);
-         llvm::outs() << "right value:: " << rightVal;
-       }
+     else if (bop->isComparisonOp()) {
        //"=" or "<" ">" ....
        if (bop->getOpcodeStr() == "==") {
-         if (leftVal == rightVal) 
+         if (op1 == op2) 
            mStack.back().bindStmt(bop, 1);
          else 
            mStack.back().bindStmt(bop, 0);
        }
        if (bop->getOpcodeStr() == ">") {
-         if (leftVal > rightVal)
+         if (op1 > op2)
+           mStack.back().bindStmt(bop, 1);
+         else
+           mStack.back().bindStmt(bop, 0);
+       }
+       if (bop->getOpcodeStr() == "<") {
+         if (op1 < op2)
            mStack.back().bindStmt(bop, 1);
          else
            mStack.back().bindStmt(bop, 0);
@@ -239,11 +202,9 @@ public:
 	   }
    }
 
-   int ifStmt(IfStmt *if_stmt) {
-     int cond_val = 0;
-     BinaryOperator* cond = dyn_cast<BinaryOperator>(if_stmt->getCond());
-     cond_val = mStack.back().getStmtVal(cond);
-     return cond_val;
+   //check condition
+   int check(BinaryOperator *cond) {
+     return mStack.back().getStmtVal(cond);
    }
 
    void declref(DeclRefExpr * declref) {
