@@ -18,6 +18,17 @@ public:
    : EvaluatedExprVisitor(context), mEnv(env) {}
    virtual ~InterpreterVisitor() {}
 
+   virtual void VisitStmt(Stmt *stmt) {
+     if (isa<BinaryOperator>(stmt)) {
+       llvm::outs() << "my visit\n";
+       BinaryOperator *bop = dyn_cast<BinaryOperator>(stmt);
+       EvaluatedExprVisitor<InterpreterVisitor>::VisitStmt(bop);
+       mEnv->binaryOp(bop);
+     }
+     else {
+       EvaluatedExprVisitor<InterpreterVisitor>::VisitStmt(stmt);
+     }
+   }
    //actions when visit binary operators
    virtual void VisitBinaryOperator (BinaryOperator * bop) {
      llvm::outs() << "hello VisitBinaryOperator!\n";
@@ -30,6 +41,14 @@ public:
      llvm::outs() << "hello VisitUnaryOperator!\n";
      VisitStmt(uop);
      mEnv->unaryOp(uop);
+
+   }
+
+   //actions when visit array expr
+   virtual void VisitSubscriptExpr(SubscriptExpr *array) {
+     llvm::outs() << "hello VisitSubscriptExpr\n";
+     VisitStmt(array);
+
 
    }
 
@@ -64,33 +83,55 @@ public:
    virtual void VisitIfStmt(IfStmt *if_stmt) {
      llvm::outs() << "hello VisitIfStmt\n";
      BinaryOperator *cond = dyn_cast<BinaryOperator>(if_stmt->getCond());
+     Stmt *then_clause = if_stmt->getThen();
+     Stmt *else_clause = if_stmt->getElse();
      //cond->dump();
      VisitStmt(cond);
      mEnv->binaryOp(cond);
-     if (mEnv->check(cond)) {
-       Stmt *then_clause = if_stmt->getThen();
-       VisitStmt(then_clause);
+     //has else stmt
+     if (then_clause == NULL) {
+       if (mEnv->check(cond)) {
+         VisitStmt(then_clause);
+       }
+       else {
+         VisitStmt(else_clause);
+       }
      }
-     else {
-       Stmt *else_clause = if_stmt->getElse();
-       VisitStmt(else_clause);
+     else { //has no else clause
+       if (mEnv->check(cond)) 
+         VisitStmt(then_clause);
      }
    }
 
    //actions when visit while stmt
    virtual void VisitWhileStmt(WhileStmt *while_stmt) {
      llvm::outs() << "hello VisitWhileStmt\n";
+     //get while block
+     Stmt *while_body = while_stmt->getBody();
      BinaryOperator *cond = NULL;
      cond = dyn_cast<BinaryOperator>(while_stmt->getCond());
      VisitStmt(cond);
      mEnv->binaryOp(cond);
      while (mEnv->check(cond)) {
-        Stmt *while_body = while_stmt->getBody();
         VisitStmt(while_body);
         VisitStmt(cond);
         mEnv->binaryOp(cond);
      }
+   }
 
+   //actions when visit for stmt
+   virtual void VisitForStmt(ForStmt *for_stmt) {
+     llvm::outs() << "hello VisitForStmt\n";
+     //get for block
+     Stmt* for_body = for_stmt->getBody();
+     BinaryOperator *cond = NULL;
+     cond = dyn_cast<BinaryOperator>(for_stmt->getCond());
+     Stmt *init = for_stmt->getInit();
+     Expr *inc = for_stmt->getInc();
+     VisitStmt(cond);
+     for ( VisitStmt(init); VisitStmt(cond), mEnv->check(cond); VisitStmt(inc)) {
+       VisitStmt(for_body);
+     }
    }
 private:
    Environment * mEnv;
