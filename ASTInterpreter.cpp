@@ -19,11 +19,15 @@ public:
    virtual ~InterpreterVisitor() {}
 
    virtual void VisitStmt(Stmt *stmt) {
-     if (isa<BinaryOperator>(stmt)) {
-       llvm::outs() << "my visit\n";
+     if (isa<BinaryOperator>(stmt) ) {
        BinaryOperator *bop = dyn_cast<BinaryOperator>(stmt);
        EvaluatedExprVisitor<InterpreterVisitor>::VisitStmt(bop);
        mEnv->binaryOp(bop);
+     }
+     else if (isa<DeclStmt>(stmt) ) {
+       DeclStmt *decl = dyn_cast<DeclStmt>(stmt);
+       EvaluatedExprVisitor<InterpreterVisitor>::VisitStmt(decl);
+       mEnv->declStmt(decl);
      }
      else {
        EvaluatedExprVisitor<InterpreterVisitor>::VisitStmt(stmt);
@@ -31,65 +35,51 @@ public:
    }
    //actions when visit binary operators
    virtual void VisitBinaryOperator (BinaryOperator * bop) {
-     llvm::outs() << "hello VisitBinaryOperator!\n";
 	   VisitStmt(bop);
-	   mEnv->binaryOp(bop);
+	   //mEnv->binaryOp(bop);
    }
  
    //actions when visit unary operators
    virtual void VisitUnaryOperator (UnaryOperator *uop) {
-     llvm::outs() << "hello VisitUnaryOperator!\n";
      VisitStmt(uop);
      mEnv->unaryOp(uop);
-
    }
 
    //actions when visit array expr
-   virtual void VisitSubscriptExpr(SubscriptExpr *array) {
-     llvm::outs() << "hello VisitSubscriptExpr\n";
+   virtual void VisitArraySubscriptExpr(ArraySubscriptExpr *array) {
      VisitStmt(array);
-
-
+     mEnv->visitArray(array);
    }
 
    //funtions when visit a declared variable or function
    virtual void VisitDeclRefExpr(DeclRefExpr * expr) {
-     llvm::outs() << "hello VisitDeclRefExpr!\n";
 	   VisitStmt(expr);
-	   mEnv->declref(expr);
+	   mEnv->declRef(expr);
    }
 
    //actions when visit cast expr
    virtual void VisitCastExpr(CastExpr * expr) {
-     llvm::outs() << "hello VisitCastExpr!\n";
 	   VisitStmt(expr);
 	   mEnv->cast(expr);
    }
 
-   //actions when visit function call expr
-   virtual void VisitCallExpr(CallExpr * call) {
-     llvm::outs() << "hello VisitCallExpr!\n";
-	   VisitStmt(call);
-	   mEnv->call(call);
-   }
 
    //actions when visit declaration stmt
    virtual void VisitDeclStmt(DeclStmt * declstmt) {
-     llvm::outs() << "hello VisitDeclStmt!\n";
-	   mEnv->declStmt(declstmt);
+     llvm::outs() << "decl\n";
+     VisitStmt(declstmt);
+	   //mEnv->declStmt(declstmt);
    }
 
    //actions when visit if stmt
    virtual void VisitIfStmt(IfStmt *if_stmt) {
-     llvm::outs() << "hello VisitIfStmt\n";
      BinaryOperator *cond = dyn_cast<BinaryOperator>(if_stmt->getCond());
      Stmt *then_clause = if_stmt->getThen();
      Stmt *else_clause = if_stmt->getElse();
-     //cond->dump();
      VisitStmt(cond);
      mEnv->binaryOp(cond);
      //has else stmt
-     if (then_clause == NULL) {
+     if (else_clause != NULL) {
        if (mEnv->check(cond)) {
          VisitStmt(then_clause);
        }
@@ -103,9 +93,30 @@ public:
      }
    }
 
+   //
+   virtual void VisitIntegerLiteral(IntegerLiteral *my_int) {
+     mEnv->integer(my_int);
+   }
+
+   virtual void VisitCallExpr(CallExpr *call) {
+     VisitStmt(call);
+     mEnv->call(call);
+     //get the function body
+     FunctionDecl *callee = call->getDirectCallee();
+     Stmt *body = callee->getBody();
+     if(body && isa<CompoundStmt>(body) ) {
+       llvm::outs() << "body\n";
+       VisitStmt(body);
+     }
+   }
+
+   virtual void VisitReturnStmt(ReturnStmt *ret_stmt) {
+     VisitStmt(ret_stmt);
+     mEnv->ret(ret_stmt);
+   }
+   
    //actions when visit while stmt
    virtual void VisitWhileStmt(WhileStmt *while_stmt) {
-     llvm::outs() << "hello VisitWhileStmt\n";
      //get while block
      Stmt *while_body = while_stmt->getBody();
      BinaryOperator *cond = NULL;
@@ -121,18 +132,29 @@ public:
 
    //actions when visit for stmt
    virtual void VisitForStmt(ForStmt *for_stmt) {
-     llvm::outs() << "hello VisitForStmt\n";
      //get for block
      Stmt* for_body = for_stmt->getBody();
      BinaryOperator *cond = NULL;
      cond = dyn_cast<BinaryOperator>(for_stmt->getCond());
      Stmt *init = for_stmt->getInit();
      Expr *inc = for_stmt->getInc();
-     VisitStmt(cond);
-     for ( VisitStmt(init); VisitStmt(cond), mEnv->check(cond); VisitStmt(inc)) {
-       VisitStmt(for_body);
+     //@TODO for( ; cond; inc)
+     //for(; ; inc)
+     //for(; ; ;)
+     //.....
+     //if init is not empty, VisitStmt(init)
+     if (init && cond && inc) {
+       for (VisitStmt(init) ; VisitStmt(cond), mEnv->check(cond); VisitStmt(inc)) {
+         VisitStmt(for_body);
+       }
+     }
+     else if (cond && inc) {
+       for ( ; VisitStmt(cond), mEnv->check(cond); VisitStmt(inc) ) {
+         VisitStmt(for_body);
+       }
      }
    }
+
 private:
    Environment * mEnv;
 };
