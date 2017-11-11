@@ -12,18 +12,20 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include <llvm/Bitcode/ReaderWriter.h>
+#include <llvm/Support/CommandLine.h>
 #include <llvm/IRReader/IRReader.h>
 #include <llvm/IR/LLVMContext.h>
-#include <llvm/IR/LegacyPassManager.h>
-#include <llvm/Support/CommandLine.h>
 #include <llvm/Support/SourceMgr.h>
+#include <llvm/IR/LegacyPassManager.h>
 #include <llvm/Support/ToolOutputFile.h>
-#include <llvm/Support/FileSystem.h>
+#include <llvm/IR/DebugInfoMetadata.h>
+
 #include <llvm/Transforms/Scalar.h>
+
 #include "llvm/IR/Function.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/raw_ostream.h"
+
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/User.h"
@@ -43,9 +45,21 @@
 #include <vector>
 #include <set>
 
+#if LLVM_VERSION_MAJOR >= 4
+#include <llvm/Bitcode/BitcodeReader.h>
+#include <llvm/Bitcode/BitcodeWriter.h>
+
+#else
+#include <llvm/Bitcode/ReaderWriter.h>
+#endif
+
+
 using namespace llvm;
 using namespace std;
-
+#if LLVM_VERSION_MAJOR >= 4
+static ManagedStatic<LLVMContext> GlobalContext;
+static LLVMContext &getGlobalContext() { return *GlobalContext; }
+#endif
 // class function_data
 // {
 // public:
@@ -231,6 +245,7 @@ struct FuncPtrPass:public FunctionPass
 	//process the function pointer
 	void getFunc (CallInst * callInst)
 	{
+    errs() << "getFunc\n";
 		Value *funcptr = callInst->getCalledValue ();
 
 		//todo:corner case-bonus,load instruction
@@ -420,6 +435,7 @@ struct FuncPtrPass:public FunctionPass
 
 	bool runOnFunction (Function & F) override
 	{
+    errs() << "hello " << F.getName() << "\n";
 		bool updated = false;
 		//for each basic block in the function
 		Function::iterator bb_it = F.begin (), bb_ie = F.end ();
@@ -504,13 +520,13 @@ int main (int argc, char **argv)
 	bool updated = Passes.run (*M.get ());
 
 	//write the changed call instruction to file
-	if(updated)
-	{
-		//errs()<<"changed\n";
-		std::error_code EC;
-		std::unique_ptr<tool_output_file> Out(new tool_output_file(InputFilename, EC, sys::fs::F_None));
-		WriteBitcodeToFile(M.get(), Out->os());
-		Out->keep();
-	}
+	//if(updated)
+	//{
+	//	//errs()<<"changed\n";
+	//	std::error_code EC;
+	//	std::unique_ptr<tool_output_file> Out(new tool_output_file(InputFilename, EC, sys::fs::F_None));
+	//	WriteBitcodeToFile(M.get(), Out->os());
+	//	Out->keep();
+	//}
 	
 }
