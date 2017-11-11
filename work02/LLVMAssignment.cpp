@@ -26,6 +26,7 @@
 #include <llvm/Support/raw_ostream.h>
 
 #include "llvm/IR/Instruction.h"
+#include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Use.h"
@@ -46,6 +47,8 @@
 #else
 #include <llvm/Bitcode/ReaderWriter.h>
 #endif
+#include<vector>
+#include<set>
 using namespace llvm;
 #if LLVM_VERSION_MAJOR >= 4
 static ManagedStatic<LLVMContext> GlobalContext;
@@ -70,6 +73,16 @@ struct EnableFunctionOptPass: public FunctionPass {
 char EnableFunctionOptPass::ID=0;
 #endif
 
+#define OUTS(vec)   {\
+  std::string out;\
+  errs() << call_inst->getDebugLoc().getLine() << ":";\
+  for(auto &name : func_name) {\
+    out.append(name).append(", ");\
+  }\
+  out.resize(out.length() - 2);\
+  errs() << out << "\n";\
+  }
+
 	
 ///!TODO TO BE COMPLETED BY YOU FOR ASSIGNMENT 2
 ///Updated 11/10/2017 by fargo: make all functions
@@ -77,9 +90,11 @@ char EnableFunctionOptPass::ID=0;
 struct FuncPtrPass : public ModulePass {
   static char ID; // Pass identification, replacement for typeid
   FuncPtrPass() : ModulePass(ID) {}
+  //we use set to store all the possible function
+  std::set<StringRef> func_name;
 
 
-void dealWithIndirectFptr(Value* val){
+  void dealWithIndirectFptr(Value* val){
     if(Argument* argument = dyn_cast<Argument>(val))
       dealWithArgument(argument);
     if(CallInst* call_inst = dyn_cast<CallInst>(val))
@@ -90,39 +105,64 @@ void dealWithIndirectFptr(Value* val){
 
 
   void dealWithPhinode(PHINode* phi_node){
-  	errs() <<"hello phinode\n";
   	unsigned num = phi_node->getNumIncomingValues();
-	for (int i = 0; i < num; ++i) {
-		Value *temp = phi_node->getIncomingValue(i);
-		if(dyn_cast<PHINode>(temp))
-			dealWithPhinode(dyn_cast<PHINode>(temp));
-		errs() << temp->getName()<<'\n';
-	}
+	  for (int i = 0; i < num; ++i) {
+	  	Value *temp = phi_node->getIncomingValue(i);
+      BasicBlock *basic = phi_node->getIncomingBlock(i);
+      BasicBlock *pre = basic->getSinglePredecessor();
+      TerminatorInst *ter = pre->getTerminator();
+      errs() << ter->getNumSuccessors() << "\n";
+      if(isa<BranchInst>(ter) ) {
+        BranchInst *br = dyn_cast<BranchInst>(ter);
+        errs() << br->getCondition()->getName() << "\n";
+        if(br->isConditional()) {
+          br->getCondition()->getType()->dump();
+          errs() << "conditional\n";
+        }
+        if(isa<Constant>(br->getCondition())) {
+          errs() << "constant\n";
+        }
+
+      }
+      if(isa<Function>(temp) ) {
+        if(!temp->getName().empty() ) {
+         func_name.insert(temp->getName() ); 
+        }
+      }
+      else {
+        dealWithIndirectFptr(temp);
+      }
+	  }
   }
 
   void dealWithArgument(Argument* argument){
-  	errs() <<"hello argument\n";
+    //argument number
     unsigned index = argument->getArgNo();
-    Function* parent_func = argument->getParent();
-    /*Value::user_iterator user_i = parent_func->user_begin();
-    for(;user_i != parent_func->user_end();++user_i){
-    	//if(Function* func = dyn_cast)
-    	(dyn_cast<Value>(user_i)).dump();
-    }*/
-    for (User * U:parent_func->users ()){
-    	U->dump();
+    //belong to which function
+    Function* func = argument->getParent();
+    auto user_i = func->user_begin();
+    for(; user_i != func->user_end(); ++user_i){
+      if(CallInst *call_inst = dyn_cast<CallInst>(*user_i) ) {
+        Value *arg = call_inst->getArgOperand(index);
+        if(Function *func_ptr = dyn_cast<Function>(arg)) {
+          func_name.insert(func_ptr->getName() );
+        }
+        else {
+          dealWithIndirectFptr(arg);
+        }
+      }
     }
   } 
 
   void dealWithCallInst(CallInst* call_inst){
-  	errs() <<"hello callinst\n";
+    //@TODO
   }
   
   bool runOnModule(Module &M) override {
-    errs() << "Hello: ";
-    errs().write_escaped(M.getName()) << '\n';
     Module::iterator func_i = M.begin();
+    //iterate on all the function
     for(;func_i != M.end();++func_i){
+      //deal with each function
     	Function* func = dyn_cast<Function>(func_i);
     	Function::iterator block_i = func->begin();
 	    for(;block_i != func->end();++block_i){
@@ -133,20 +173,20 @@ void dealWithIndirectFptr(Value* val){
 	    			//deal with direct function call
 	    			if(Function* called_func = call_inst->getCalledFunction()){
 	    				if(!called_func->isIntrinsic())
-	    			    	errs()<<call_inst->getDebugLoc().getLine()<<":"<<called_func->getName()<<'\n';
+	    			    errs()<<call_inst->getDebugLoc().getLine()<<":"<<called_func->getName()<<'\n';
 	    			}
 	    			//deal with indirect function call
-	    		    else{
-	    		    	errs()<<call_inst->getDebugLoc().getLine()<<"---------->"<<'\n';
-	    		    	Value* called_value = call_inst->getCalledValue();
-	    		    	called_value->dump();
-	                    dealWithIndirectFptr(called_value);
-	    		    }
+	    		  else{
+	    		  	Value* called_value = call_inst->getCalledValue();
+	            dealWithIndirectFptr(called_value);
+              if(!func_name.empty()) {
+                OUTS(func_name);
+              }
+	    		  }
 	    		} 
 	    	} 
 	    }
     }
-    errs()<<"------------------------------\n";
     return false;
 	}
 };
