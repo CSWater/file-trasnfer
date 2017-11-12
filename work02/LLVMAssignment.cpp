@@ -96,15 +96,12 @@ struct FuncPtrPass : public ModulePass {
 
   void dealWithIndirectFptr(Value* val){
     if(Argument* argument = dyn_cast<Argument>(val)) {
-      errs() << "here 5\n";
       dealWithArgument(argument);
     }
     if(CallInst* call_inst = dyn_cast<CallInst>(val)) {
-      errs() << "here 6\n";
       dealWithCallInst(call_inst);
     }
     if(PHINode* phi_node = dyn_cast<PHINode>(val)) {
-      errs() << "here 7\n";
       dealWithPhinode(phi_node);
     }
   }
@@ -176,19 +173,27 @@ struct FuncPtrPass : public ModulePass {
         }
         //used as a param of a function call, i.e funcXXX(..., func, ...)
         else {
-          errs() << "here use as param\n";
           unsigned num = call_inst->getNumArgOperands();
           int i = 0;
+          //as a param, find the param number in the param list
           for(i = 0; i < num; ++i) {
             Value *temp_arg = call_inst->getArgOperand(i);
             if(temp_name1.compare(temp_arg->getName()) == 0)
-              //errs() << temp_arg->getName() << "\n";
               break;
           }
-          errs() << i << "\n";
+          //visit the called function to get what the param "func" do in the called function
           Function *call_func = call_inst->getCalledFunction();
-          for(auto iter = call_func->arg_begin(); iter != call_func->arg_end(); ++iter) {
-            errs() << iter->getName() << "\n";
+          for(auto inst_i = inst_begin(call_func); inst_i != inst_end(call_func); ++inst_i) {
+            if(CallInst *param_call = dyn_cast<CallInst>(&(*inst_i) ) ) {
+	    			  if(Function* called_func = param_call->getCalledFunction()){/*intrinsic, Do nothing*/}
+              else {
+	    		  	  Value* called_value = param_call->getCalledValue();
+                //make sure deal with the right CallInst
+                if(isa<Argument>(called_value) && (dyn_cast<Argument>(called_value)->getArgNo() == i) ) {
+                  func_name.insert(param_call->getArgOperand(0)->getName());
+                }
+              }
+            }
           }
         }
       }
