@@ -95,35 +95,52 @@ struct FuncPtrPass : public ModulePass {
 
 
   void dealWithIndirectFptr(Value* val){
-    if(Argument* argument = dyn_cast<Argument>(val))
+    if(Argument* argument = dyn_cast<Argument>(val)) {
+      errs() << "here 5\n";
       dealWithArgument(argument);
-    if(CallInst* call_inst = dyn_cast<CallInst>(val))
+    }
+    if(CallInst* call_inst = dyn_cast<CallInst>(val)) {
+      errs() << "here 6\n";
       dealWithCallInst(call_inst);
-    if(PHINode* phi_node = dyn_cast<PHINode>(val))
+    }
+    if(PHINode* phi_node = dyn_cast<PHINode>(val)) {
+      errs() << "here 7\n";
       dealWithPhinode(phi_node);
+    }
   }
 
 
   void dealWithPhinode(PHINode* phi_node){
   	unsigned num = phi_node->getNumIncomingValues();
-	  for (int i = 0; i < num; ++i) {
-	  	Value *temp = phi_node->getIncomingValue(i);
+    std::set<BasicBlock *> pre_block;
+    for(int i = 0; i < num; ++i) {
       BasicBlock *basic = phi_node->getIncomingBlock(i);
       BasicBlock *pre = basic->getSinglePredecessor();
+      pre_block.insert(pre);
+    }
+    if(pre_block.size() == 1) {
+      BasicBlock *pre = *pre_block.begin(); 
       TerminatorInst *ter = pre->getTerminator();
-      errs() << ter->getNumSuccessors() << "\n";
       if(isa<BranchInst>(ter) ) {
         BranchInst *br = dyn_cast<BranchInst>(ter);
-        errs() << br->getCondition()->getName() << "\n";
-        if(br->isConditional()) {
-          br->getCondition()->getType()->dump();
-          errs() << "conditional\n";
+        if(br->isConditional() ) {
+          CmpInst *cmp = dyn_cast<CmpInst>(br->getCondition());
+          Value *op1 = cmp->getOperand(0);
+          Value *op2 = cmp->getOperand(1);
+          if(isa<ConstantInt>(op1) && isa<ConstantInt>(op2) ) {
+            //TODO ???
+            //why int opt_value = dyn_cast<ConstantInt>(op1).getSExtValue() is wrong
+            int op1_value = (*dyn_cast<ConstantInt>(op1)).getSExtValue();
+            int op2_value = (*dyn_cast<ConstantInt>(op2)).getSExtValue();
+            if(op1_value > op2_value) {
+              phi_node->removeIncomingValue(1);
+            }
+          }
         }
-        if(isa<Constant>(br->getCondition())) {
-          errs() << "constant\n";
-        }
-
       }
+    }
+	  for (int i = 0; i < phi_node->getNumIncomingValues(); ++i) {
+	  	Value *temp = phi_node->getIncomingValue(i);
       if(isa<Function>(temp) ) {
         if(!temp->getName().empty() ) {
          func_name.insert(temp->getName() ); 
@@ -140,22 +157,83 @@ struct FuncPtrPass : public ModulePass {
     unsigned index = argument->getArgNo();
     //belong to which function
     Function* func = argument->getParent();
+    std::string temp_name1 = func->getName();
     auto user_i = func->user_begin();
     for(; user_i != func->user_end(); ++user_i){
+      //call function name is the last operand of the user_i
+      unsigned num = (*user_i)->getNumOperands();
+      std::string temp_name2 = (*user_i)->getOperand(num - 1)->getName();
       if(CallInst *call_inst = dyn_cast<CallInst>(*user_i) ) {
-        Value *arg = call_inst->getArgOperand(index);
-        if(Function *func_ptr = dyn_cast<Function>(arg)) {
-          func_name.insert(func_ptr->getName() );
+        //used as a function call, i.e func(param_0, param_1, ...)
+        if(temp_name2.compare(temp_name1) == 0) {
+          Value *arg = call_inst->getArgOperand(index);
+          if(Function *func_ptr = dyn_cast<Function>(arg)) {
+            func_name.insert(func_ptr->getName() );
+          }
+          else {
+            dealWithIndirectFptr(arg);
+          }
         }
+        //used as a param of a function call, i.e funcXXX(..., func, ...)
         else {
-          dealWithIndirectFptr(arg);
+          errs() << "here use as param\n";
+          unsigned num = call_inst->getNumArgOperands();
+          int i = 0;
+          for(i = 0; i < num; ++i) {
+            Value *temp_arg = call_inst->getArgOperand(i);
+            if(temp_name1.compare(temp_arg->getName()) == 0)
+              //errs() << temp_arg->getName() << "\n";
+              break;
+          }
+          errs() << i << "\n";
+          Function *call_func = call_inst->getCalledFunction();
+          for(auto iter = call_func->arg_begin(); iter != call_func->arg_end(); ++iter) {
+            errs() << iter->getName() << "\n";
+          }
+        }
+      }
+      else if(PHINode *phi_node = dyn_cast<PHINode>(*user_i) ) {
+        for(User *user_p :phi_node->users() )  {
+          if(CallInst *call_inst = dyn_cast<CallInst>(user_p)) {
+            Value *arg = call_inst->getArgOperand(index);
+            if(Function * arg_func = dyn_cast<Function>(arg) ) {
+              func_name.insert(arg_func->getName());
+            }
+            else {
+              dealWithIndirectFptr(arg);
+            }
+          }
         }
       }
     }
   } 
 
   void dealWithCallInst(CallInst* call_inst){
-    //@TODO
+    if(Function *called_func = call_inst->getCalledFunction() ) {
+      for(auto inst_i = inst_begin(called_func); inst_i != inst_end(called_func); ++inst_i) {
+        if(ReturnInst *ret = dyn_cast<ReturnInst>(&(*inst_i) ) ) {
+          Value *return_val = ret->getReturnValue();
+          dealWithIndirectFptr(return_val);
+        }
+      }
+    }
+    else {
+      Value *called_value = call_inst->getCalledValue();
+      if(PHINode *phi_node = dyn_cast<PHINode>(called_value)) {
+        unsigned num = phi_node->getNumIncomingValues();
+        for(int i = 0; i < num; ++i) {
+          Value *temp = phi_node->getIncomingValue(i);
+          if(Function *called_func = dyn_cast<Function>(temp)) {
+            for(auto inst_i = inst_begin(called_func); inst_i != inst_end(called_func); ++inst_i) {
+              if(ReturnInst *ret = dyn_cast<ReturnInst>(&(*inst_i) ) ) {
+                Value *return_val = ret->getReturnValue();
+                dealWithIndirectFptr(return_val);
+              }
+            }
+          }
+        }
+      }
+    }
   }
   
   bool runOnModule(Module &M) override {
@@ -164,10 +242,13 @@ struct FuncPtrPass : public ModulePass {
     for(;func_i != M.end();++func_i){
       //deal with each function
     	Function* func = dyn_cast<Function>(func_i);
+      if(!func) 
+        continue;
     	Function::iterator block_i = func->begin();
 	    for(;block_i != func->end();++block_i){
 	    	BasicBlock::iterator inst_i = block_i->begin();
 	    	for(;inst_i != block_i->end();++inst_i){
+          func_name.clear();
 	    		Instruction* inst = dyn_cast<Instruction> (inst_i);
 	    		if(CallInst* call_inst = dyn_cast<CallInst> (inst)){
 	    			//deal with direct function call
