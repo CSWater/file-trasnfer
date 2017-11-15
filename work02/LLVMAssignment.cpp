@@ -74,16 +74,6 @@ struct EnableFunctionOptPass: public FunctionPass {
 char EnableFunctionOptPass::ID=0;
 #endif
 
-#define OUTS(vec)   {\
-  std::string out;\
-  errs() << call_inst->getDebugLoc().getLine() << ":";\
-  for(auto &name : func_name) {\
-    out.append(name).append(", ");\
-  }\
-  out.resize(out.length() - 2);\
-  errs() << out << "\n";\
-  }
-
 	
 ///!TODO TO BE COMPLETED BY YOU FOR ASSIGNMENT 2
 ///Updated 11/10/2017 by fargo: make all functions
@@ -91,8 +81,6 @@ char EnableFunctionOptPass::ID=0;
 struct FuncPtrPass : public ModulePass {
   static char ID; // Pass identification, replacement for typeid
   FuncPtrPass() : ModulePass(ID) {}
-  //we use set to store all the possible function
-  //std::set<StringRef> func_name;
   struct line_func {
     unsigned line;
     std::set<StringRef> name;
@@ -126,11 +114,9 @@ struct FuncPtrPass : public ModulePass {
 
 
   void dealWithPhinode(PHINode* phi_node){
+    //phi_node->getParent()->dump();
   	unsigned num = phi_node->getNumIncomingValues();
-    //BasicBlock *itt = phi_node->getParent();
-    //itt->dump();
-    //errs() << "here\n"; 
-    //itt->getTerminator()->dump();
+
     std::set<BasicBlock *> pre_block;
     unsigned wanted = -1;
     for(int i = 0; i < num; ++i) {
@@ -155,37 +141,34 @@ struct FuncPtrPass : public ModulePass {
             if(op1_value > op2_value) {
               //phi_node->removeIncomingValue(1);
               wanted = 0;
+	            for (int i = 0; i < phi_node->getNumIncomingValues(); ++i) {
+                if(i == wanted) {
+	            	  Value *temp = phi_node->getIncomingValue(i);
+                  if(isa<Function>(temp) ) {
+                    if(!temp->getName().empty() ) {
+                     phi_node->replaceAllUsesWith(temp);      
+                     updated = true;
+                     func_name.back().name.insert(temp->getName() );
+                    }
+                  }
+                }
+              }
+              //have updated, return;
+              return;
             }
           }
         }
       }
     }
 	  for (int i = 0; i < phi_node->getNumIncomingValues(); ++i) {
-      if(i == wanted) {
-	  	  Value *temp = phi_node->getIncomingValue(i);
-        if(isa<Function>(temp) ) {
-          if(!temp->getName().empty() ) {
-           phi_node->replaceAllUsesWith(temp);      
-           updated = true;
-           func_name.back().name.insert(temp->getName() );
-           //func_name.insert(temp->getName() ); 
-          }
-        }
-        else {
-          dealWithIndirectFptr(temp);
+	  	Value *temp = phi_node->getIncomingValue(i);
+      if(isa<Function>(temp) ) {
+        if(!temp->getName().empty() ) {
+         func_name.back().name.insert(temp->getName() );
         }
       }
       else {
-	  	  Value *temp = phi_node->getIncomingValue(i);
-        if(isa<Function>(temp) ) {
-          if(!temp->getName().empty() ) {
-           func_name.back().name.insert(temp->getName() );
-           //func_name.insert(temp->getName() ); 
-          }
-        }
-        else {
-          dealWithIndirectFptr(temp);
-        }
+        dealWithIndirectFptr(temp);
       }
 	  }
   }
@@ -207,7 +190,6 @@ struct FuncPtrPass : public ModulePass {
           Value *arg = call_inst->getArgOperand(index);
           if(Function *func_ptr = dyn_cast<Function>(arg)) {
             func_name.back().name.insert(func_ptr->getName() );
-            //func_name.insert(func_ptr->getName() );
           }
           else {
             dealWithIndirectFptr(arg);
@@ -233,7 +215,6 @@ struct FuncPtrPass : public ModulePass {
                 //make sure deal with the right CallInst
                 if(isa<Argument>(called_value) && (dyn_cast<Argument>(called_value)->getArgNo() == i) ) {
                   func_name.back().name.insert(param_call->getArgOperand(index)->getName() );
-                  //func_name.insert(param_call->getArgOperand(index)->getName());
                   //Argument *temp_arg = dyn_cast<Argument>(param_call->getArgOperand(index));
                   //dealWithArgument(temp_arg);
                 }
@@ -248,10 +229,13 @@ struct FuncPtrPass : public ModulePass {
             Value *arg = call_inst->getArgOperand(index);
             if(Function * arg_func = dyn_cast<Function>(arg) ) {
               func_name.back().name.insert(arg_func->getName() );
-              //func_name.insert(arg_func->getName());
             }
             else {
-              dealWithIndirectFptr(arg);
+              if(PHINode *temp = dyn_cast<PHINode>(arg)) {
+                temp->replaceAllUsesWith(temp->getIncomingValue(0));      
+                updated = true;
+              }
+              //func_name.back().name.insert(temp->getName() );
             }
           }
         }
@@ -300,7 +284,6 @@ struct FuncPtrPass : public ModulePass {
 	    for(;block_i != func->end();++block_i){
 	    	BasicBlock::iterator inst_i = block_i->begin();
 	    	for(;inst_i != block_i->end();++inst_i){
-          //func_name.clear();
 	    		Instruction* inst = dyn_cast<Instruction> (inst_i);
 	    		if(CallInst* call_inst = dyn_cast<CallInst> (inst)){
 	    			//deal with direct function call
@@ -314,7 +297,6 @@ struct FuncPtrPass : public ModulePass {
                 }
                 func_name.back().name.insert(called_func->getName());
               }
-	    			  //  errs()<<call_inst->getDebugLoc().getLine()<<":"<<called_func->getName()<<'\n';
 	    			}
 	    			//deal with indirect function call
 	    		  else{
@@ -326,15 +308,14 @@ struct FuncPtrPass : public ModulePass {
                 func_name.push_back(temp);
               }
 	            dealWithIndirectFptr(called_value);
-              //if(!func_name.empty()) {
-              //  OUTS(func_name);
-              //}
 	    		  }
 	    		} 
 	    	} 
 	    }
     }
     display(func_name);
+    //if(updated )
+    //  errs() << "\n updated!!!!!\n";
     return updated;
 	}
 };
