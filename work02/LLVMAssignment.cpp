@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include <llvm/Support/CommandLine.h>
+#include <llvm/Support/FileSystem.h>
 #include <llvm/IRReader/IRReader.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/Support/SourceMgr.h>
@@ -73,16 +74,6 @@ struct EnableFunctionOptPass: public FunctionPass {
 char EnableFunctionOptPass::ID=0;
 #endif
 
-#define OUTS(vec)   {\
-  std::string out;\
-  errs() << call_inst->getDebugLoc().getLine() << ":";\
-  for(auto &name : func_name) {\
-    out.append(name).append(", ");\
-  }\
-  out.resize(out.length() - 2);\
-  errs() << out << "\n";\
-  }
-
 	
 ///!TODO TO BE COMPLETED BY YOU FOR ASSIGNMENT 2
 ///Updated 11/10/2017 by fargo: make all functions
@@ -90,10 +81,25 @@ char EnableFunctionOptPass::ID=0;
 struct FuncPtrPass : public ModulePass {
   static char ID; // Pass identification, replacement for typeid
   FuncPtrPass() : ModulePass(ID) {}
-  //we use set to store all the possible function
-  std::set<StringRef> func_name;
+  struct line_func {
+    unsigned line;
+    std::set<StringRef> name;
+  };
+  std::vector<line_func>func_name;
 
+  bool updated;
 
+  void display(std::vector<line_func> &funcname) {
+    for(auto iter = funcname.begin(); iter != funcname.end(); ++iter) {
+      std::string out;
+      errs() << iter->line << ":";
+      for(auto &it : iter->name) {
+        out.append(it).append(", ");
+      }
+      out.resize(out.length() - 2);
+      errs() << out << "\n";
+    }
+  }
   void dealWithIndirectFptr(Value* val){
     if(Argument* argument = dyn_cast<Argument>(val)) {
       dealWithArgument(argument);
@@ -108,8 +114,11 @@ struct FuncPtrPass : public ModulePass {
 
 
   void dealWithPhinode(PHINode* phi_node){
+    //phi_node->getParent()->dump();
   	unsigned num = phi_node->getNumIncomingValues();
+
     std::set<BasicBlock *> pre_block;
+    unsigned wanted = -1;
     for(int i = 0; i < num; ++i) {
       BasicBlock *basic = phi_node->getIncomingBlock(i);
       BasicBlock *pre = basic->getSinglePredecessor();
@@ -130,7 +139,22 @@ struct FuncPtrPass : public ModulePass {
             int op1_value = (*dyn_cast<ConstantInt>(op1)).getSExtValue();
             int op2_value = (*dyn_cast<ConstantInt>(op2)).getSExtValue();
             if(op1_value > op2_value) {
-              phi_node->removeIncomingValue(1);
+              //phi_node->removeIncomingValue(1);
+              wanted = 0;
+	            for (int i = 0; i < phi_node->getNumIncomingValues(); ++i) {
+                if(i == wanted) {
+	            	  Value *temp = phi_node->getIncomingValue(i);
+                  if(isa<Function>(temp) ) {
+                    if(!temp->getName().empty() ) {
+                     phi_node->replaceAllUsesWith(temp);      
+                     updated = true;
+                     func_name.back().name.insert(temp->getName() );
+                    }
+                  }
+                }
+              }
+              //have updated, return;
+              return;
             }
           }
         }
@@ -140,7 +164,7 @@ struct FuncPtrPass : public ModulePass {
 	  	Value *temp = phi_node->getIncomingValue(i);
       if(isa<Function>(temp) ) {
         if(!temp->getName().empty() ) {
-         func_name.insert(temp->getName() ); 
+         func_name.back().name.insert(temp->getName() );
         }
       }
       else {
@@ -165,7 +189,7 @@ struct FuncPtrPass : public ModulePass {
         if(temp_name2.compare(temp_name1) == 0) {
           Value *arg = call_inst->getArgOperand(index);
           if(Function *func_ptr = dyn_cast<Function>(arg)) {
-            func_name.insert(func_ptr->getName() );
+            func_name.back().name.insert(func_ptr->getName() );
           }
           else {
             dealWithIndirectFptr(arg);
@@ -190,7 +214,9 @@ struct FuncPtrPass : public ModulePass {
 	    		  	  Value* called_value = param_call->getCalledValue();
                 //make sure deal with the right CallInst
                 if(isa<Argument>(called_value) && (dyn_cast<Argument>(called_value)->getArgNo() == i) ) {
-                  func_name.insert(param_call->getArgOperand(0)->getName());
+                  func_name.back().name.insert(param_call->getArgOperand(index)->getName() );
+                  //Argument *temp_arg = dyn_cast<Argument>(param_call->getArgOperand(index));
+                  //dealWithArgument(temp_arg);
                 }
               }
             }
@@ -202,10 +228,14 @@ struct FuncPtrPass : public ModulePass {
           if(CallInst *call_inst = dyn_cast<CallInst>(user_p)) {
             Value *arg = call_inst->getArgOperand(index);
             if(Function * arg_func = dyn_cast<Function>(arg) ) {
-              func_name.insert(arg_func->getName());
+              func_name.back().name.insert(arg_func->getName() );
             }
             else {
-              dealWithIndirectFptr(arg);
+              if(PHINode *temp = dyn_cast<PHINode>(arg)) {
+                temp->replaceAllUsesWith(temp->getIncomingValue(0));      
+                updated = true;
+              }
+              //func_name.back().name.insert(temp->getName() );
             }
           }
         }
@@ -242,6 +272,7 @@ struct FuncPtrPass : public ModulePass {
   }
   
   bool runOnModule(Module &M) override {
+    updated = false;
     Module::iterator func_i = M.begin();
     //iterate on all the function
     for(;func_i != M.end();++func_i){
@@ -253,27 +284,39 @@ struct FuncPtrPass : public ModulePass {
 	    for(;block_i != func->end();++block_i){
 	    	BasicBlock::iterator inst_i = block_i->begin();
 	    	for(;inst_i != block_i->end();++inst_i){
-          func_name.clear();
 	    		Instruction* inst = dyn_cast<Instruction> (inst_i);
 	    		if(CallInst* call_inst = dyn_cast<CallInst> (inst)){
 	    			//deal with direct function call
 	    			if(Function* called_func = call_inst->getCalledFunction()){
-	    				if(!called_func->isIntrinsic())
-	    			    errs()<<call_inst->getDebugLoc().getLine()<<":"<<called_func->getName()<<'\n';
+	    				if(!called_func->isIntrinsic()) {
+                unsigned line = call_inst->getDebugLoc().getLine();
+                if(func_name.empty() || func_name.back().line != line) {
+                  line_func temp;
+                  temp.line = line;
+                  func_name.push_back(temp);
+                }
+                func_name.back().name.insert(called_func->getName());
+              }
 	    			}
 	    			//deal with indirect function call
 	    		  else{
 	    		  	Value* called_value = call_inst->getCalledValue();
-	            dealWithIndirectFptr(called_value);
-              if(!func_name.empty()) {
-                OUTS(func_name);
+              unsigned line = call_inst->getDebugLoc().getLine();
+              if(func_name.empty() || func_name.back().line != line) {
+                line_func temp;
+                temp.line = line;
+                func_name.push_back(temp);
               }
+	            dealWithIndirectFptr(called_value);
 	    		  }
 	    		} 
 	    	} 
 	    }
     }
-    return false;
+    display(func_name);
+    //if(updated )
+    //  errs() << "\n updated!!!!!\n";
+    return updated;
 	}
 };
 
@@ -313,6 +356,16 @@ int main(int argc, char **argv) {
 
    /// Your pass to print Function and Call Instructions
    Passes.add(new FuncPtrPass());
-   Passes.run(*M.get());
+   bool updated = Passes.run(*M.get());
+
+   if(updated) {
+     std::error_code EC;
+     std::unique_ptr<tool_output_file> Out(new tool_output_file(InputFilename, EC, sys::fs::F_RW));
+     if(EC) {
+       errs() << EC.message() << "\n";
+     }
+     WriteBitcodeToFile(M.get(), Out->os());
+     Out->keep();
+   }
 }
 
