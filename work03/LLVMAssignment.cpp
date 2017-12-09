@@ -109,11 +109,11 @@ int main(int argc, char **argv) {
    Passes.add(llvm::createPromoteMemoryToRegisterPass());
 
    /// Your pass to print Function and Call Instructions
-   //Passes.add(new Liveness());
-   Passes.add(new FuncPtrPass());
+   Passes.add(new Liveness());
+   //Passes.add(new FuncPtrPass());
    Passes.run(*M.get());
 #ifndef NDEBUG
-   system("pause");
+  // system("pause");
 #endif
 }
 
