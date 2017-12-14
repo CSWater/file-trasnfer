@@ -19,14 +19,25 @@
 using namespace llvm;
 
 #define VALUE_TYPE 1
-#define POINTER_TYPE 2
+#define POINTER_TYPE 2            //indicates psv
+#define PHI_TYPE  4               //indicates pmv
 #define ARG_TYPE 128
 
+//struct to store output result
+struct LineFunc {
+  Instruction *inst;
+  std::set<std::string> name;
+  LineFunc():inst(NULL), name() { }
+};
 //struct to denote a pointer variable and its point-to-set
 struct PtrNode {
   std::string id;         //ptr id
   int type;   
-  std::set<PtrNode *> *pts;                //point to sets
+  PtrNode *psv;
+  std::string psv_name;
+  std::set<PtrNode *> *pmv;
+  std::set<std::string> pmv_name;
+  PtrNode() : id(), type(0), psv(NULL), psv_name(), pmv(NULL), pmv_name() {}
 };
 //struct to denote a pts of an instruction
 typedef std::pair<Instruction *, std::set<PtrNode *> *> IPTS;
@@ -39,19 +50,21 @@ void dump(IPTS *ipts) {
   ipts->first->dump();
   std::set<PtrNode *> *pts = ipts->second;
   //iterate over ptr variable
-  for(auto iter = pts->begin(); iter != pts->end(); ++iter) {
-    PtrNode *ptr = *iter;
+  for(auto iter1 = pts->begin(); iter1 != pts->end(); ++iter1) {
+    PtrNode *ptr = *iter1;
     outs() << ptr->id << ":";
-    std::set<PtrNode *> *ptr_pts = ptr->pts;  //get ptr varialbe's pts
-    if (!ptr_pts && ptr_pts->empty() ) {
-      outs() << "NULL\n";
-      continue;
+    if(ptr->type == PHI_TYPE) {
+      for(auto iter2 = ptr->pmv_name.begin(); iter2 != ptr->pmv_name.end(); ++ iter2) {
+        outs() << *iter2 << "\t";
+      }
+      outs() << "\n";
     }
-    //iterate over ptr variable's pts
-    for(auto it = ptr_pts->begin(); it != ptr_pts->end(); ++it) {
-      outs() << (*it)->id << "\t";
+    else if((ptr->type & 0x80) == ARG_TYPE) {
+      outs() << ptr->psv_name << "\n";
     }
-    outs() << "\n";
+    else {
+      outs() << ptr->psv_name << "\n";
+    }
   }
 }
 void dump(BPTS *bpts) {
@@ -86,12 +99,23 @@ public:
 };
 
 class PTSVisitor : public DataflowVisitor<struct PTSInfo> {
-public:
+private:
+ //global function addr
+ std::map<std::string, PtrNode *> gfuncs;
+ //store all the call inst to help inter procedure PTS analysis
+ std::vector<Instruction *> call_inst_vec;
+ //store result
+ std::vector<LineFunc> result;
+public :
  PTSVisitor() {}
  //function to compute PTS of a given function
  void computePTS(Function *F, PTSInfo *pts_info) override {
    if(F->isIntrinsic() ) 
      return;
+   PtrNode *func_ptr = new PtrNode;
+   func_ptr->id = F->getName();
+   func_ptr->type = VALUE_TYPE;
+   gfuncs[F->getName()] = func_ptr;
    FPTS *fpts = new FPTS;
    std::vector<BPTS *> *bpts_vec = new std::vector<BPTS *>;
    for(auto block_i = F->begin(); block_i != F->end(); ++block_i) {
@@ -144,17 +168,57 @@ public:
  void interProcedurePTSTransfer(PTSInfo *gpts) override {
    computeGPTS(gpts);
    int flag = 1;
-   while(flag) {
-     flag = 0;
-     for(auto iter = call_inst_vec.rbegin(); iter != call_inst_vec.rend(); ++iter) {
-       IPTS *curr_ipts = getIPTS(*iter, gpts);
-       CallInst *call_inst = cast<CallInst>(*iter);
-       getParamsFromCalled(call_inst, curr_ipts, gpts);
-     }
+   flag = 0;
+   for(auto iter = call_inst_vec.rbegin(); iter != call_inst_vec.rend(); ++iter) {
+     IPTS *curr_ipts = getIPTS(*iter, gpts);
+     CallInst *call_inst = cast<CallInst>(*iter);
+     getParamsFromCalled(call_inst, curr_ipts, gpts);
+     //computeResult(gpts);
    }
-   computeGPTS(gpts);
  }
  
+ void computeResult(PTSInfo *gpts) {
+   for(auto iter = result.begin(); iter != result.end(); ++iter) {
+     LineFunc &temp = *iter;
+     CallInst *call_inst = cast<CallInst>(temp.inst);
+     //direct call
+     if(Function *func = call_inst->getCalledFunction() ) {
+       temp.name.insert(func->getName() );
+     }
+     else {                     //indirect call
+        Value *call = call_inst->getCalledValue();
+        std::string ptr_name = call->getName();
+        IPTS *ipts = getIPTS(temp.inst, gpts);
+        PtrNode *me = NULL;
+        for(auto it = ipts->second->begin(); it != ipts->second->end(); ++it) {
+          if(!ptr_name.compare((*it)->id) ) {
+            me = *it;
+            break;
+          }
+        }
+        //@TODO  decide if it is a phi_node, now assume it is not
+        PtrNode *point_to = me->psv;
+        if(point_to->type != PHI_TYPE) {
+          while(point_to->type != VALUE_TYPE) {
+            me = point_to;
+            point_to = me->psv;
+          }
+          temp.name.insert(point_to->id);
+        }
+        else {
+          std::set<PtrNode *> *pmv = point_to->pmv;
+          for(auto it = pmv->begin(); it != pmv->end(); ++it) {
+            PtrNode *ptr = *it;
+            while(ptr->type != VALUE_TYPE) {
+              ptr = ptr->psv;
+            }
+            temp.name.insert(ptr->id);
+          }
+        }
+     }
+   }
+
+ }
  //function to compute PTS of a given BasicBlock
  void computeBPTS(BasicBlock *block, std::vector<BPTS *> *bpts_vec) {
    BPTS *bpts = new BPTS;
@@ -182,8 +246,11 @@ public:
        }
      }
      else {                     //normal function call
-       //push back call inst for output result
+       //push back call inst for interProcedure PTS analysis
        call_inst_vec.push_back(curr); 
+       LineFunc temp;
+       temp.inst = curr;
+       result.push_back(temp);
        dealWithCall(curr, ipts_vec);
      }
    }
@@ -196,12 +263,23 @@ public:
    //}
  }
 
+ //print result
+ void printResult() {
+   if(result.empty() )
+     return;
+   for(auto iter = result.begin(); iter != result.end(); ++iter) {
+     std::string out;
+     errs() << iter->inst->getDebugLoc()->getLine() << ":";
+     for(auto &it : iter->name) {
+       out.append(it).append(", ");
+     }
+     out.resize(out.length() - 2);
+     errs() << out << "\n";
+   }
+ }
+
 private:
- //store all the call inst to print out function call
- std::vector<Instruction *> call_inst_vec;
- //quick to find ptr node according to varialble name
- std::map<std::string, PtrNode *> ptr_node_table;     
-//get real arg from called, if changed gpts, return 1
+ //get real arg from called, if changed gpts, return 1
  int getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gpts) {
    if(Function *func = call_inst->getCalledFunction() ) {       //direct function call
      unsigned num = call_inst->getNumArgOperands();
@@ -216,12 +294,16 @@ private:
              break;
            }
          }
-         //get arg PtrNode
          std::string arg_name = arg->getName();
          PtrNode *arg_ptr_node = NULL;
-         for(auto it = ipts->second->begin(); it != ipts->second->end(); ++it) {
-           if(arg_name.compare((*it)->id) ) {
-             arg_ptr_node = *it;
+         if(gfuncs.find(arg_name) != gfuncs.end() ) {         //func addr as param
+           arg_ptr_node = gfuncs.find(arg_name)->second;
+         }
+         else {                                               //func ptr as param
+           for(auto it = ipts->second->begin(); it != ipts->second->end(); ++it) {
+             if(!arg_name.compare((*it)->id) ) {
+               arg_ptr_node = *it;
+             }
            }
          }
          transferParamToFunc(arg_ptr_node, i, fpts);
@@ -229,10 +311,7 @@ private:
      }
    }
    else {                                                       //indirect function call
-     //outs() << "indirect call:";
-     //Value *call = call_inst->getCalledValue();
-     //outs() << call->getName() << "\n";
-     //Function *func = getFuntionByName(call->getName() );
+     //@TODO
    }
    return 0;
  }
@@ -244,9 +323,12 @@ private:
    for(auto iteri = entry_bpts->second->begin(); iteri != entry_bpts->second->end(); ++iteri) {
      IPTS *ipts = *iteri;
      for(auto iter = ipts->second->begin(); iter != ipts->second->end(); ++iter) {
-        PtrNode *ptr = *iter;
-        if((ptr->type & 0x80 ) &&(ptr->type & 0xf) == (index + 1) ) {  //index start at 0, but argNO start at 1
-          ptr->pts->insert(arg);
+        PtrNode *param = *iter;
+        if((param->type & 0x80 ) &&(param->type & 0xf) == (index + 1) ) {  //index start at 0, but argNO start at 1
+          //param->pmv->insert(arg);
+          //param->pmv_name.insert(arg->id);
+          param->psv_name = arg->id;
+          param->psv = arg;
           outs() << "\n" << arg->id << " transfer complete!\n";
           return;
         }
@@ -254,22 +336,40 @@ private:
    }
  }
 
+ //merge the IPTS of two successive inst
+ //two stages
+ //stage 1, logically merge and update
+ //stage 2, physically update
+ //for example (dest:af_ptr-->plus, bf_ptr-->minus) (src:cf_ptr's ptr_name is af_ptr)
+ //stage 1, dest:af_ptr-->plus, bf_ptr-->minus, cf_ptr's ptr_name is af_ptr
+ //stage 2, dest:af_ptr-->plus, bf_ptr-->minus. cf_ptr-->af_ptr
+ //@TODO there is some problem to be solved, in a single block, a ptr get two value
+ //but it should has the last value as its value at last
  void merge(IPTS *dest, IPTS *src) {
    std::set<PtrNode *> *dest_pts = dest->second;
    std::set<PtrNode *> *src_pts = src->second;
+   //stage 1 merge
    for(auto iters = src_pts->begin(); iters != src_pts->end(); ++iters) {
      PtrNode *temp = *iters;
      bool new_var = true;
      for(auto iterd = dest_pts->begin(); iterd != dest_pts->end(); ++iterd) {
-       if(!temp->id.compare((*iterd)->id) ) {     //merge the pts of the same ptr variable
+       if(!temp->id.compare((*iterd)->id) ) {    
          new_var = false;
-         for(auto iter = temp->pts->begin(); iter != temp->pts->end(); ++iter) {
-           (*iterd)->pts->insert(*iter);
-         }
        }
      }
      if(new_var) {
         dest_pts->insert(temp);
+     }
+   }
+   //stage 2 merge
+   for(auto iter1 = dest_pts->begin(); iter1 != dest_pts->end(); ++iter1) {
+     PtrNode *temp = *iter1;
+     if(!temp->psv) {
+       for(auto iter2 = dest_pts->begin(); iter2 != dest_pts->end(); ++iter2) {
+        //@TODO deal with pmv
+        if(!temp->psv_name.compare((*iter2)->id) )
+          temp->psv = *iter2;
+       }
      }
    }
  }
@@ -291,36 +391,33 @@ private:
      temp_ipts->second = new std::set<PtrNode *>;
      PtrNode *temp_node = new PtrNode;
      temp_node->id = var_name; 
-     //push the ptr node into ptr_node_table, node with same name need to further deal with
-     ptr_node_table[temp_node->id] = temp_node;
      //if it is a parameter, create a PtrNode and initialize it as "NULL"
+     //when a call occurs, we use real_arg to initialize 
      if(var_meta->getArg() ) {
-       //argNO start at 1
-       temp_node->type = ARG_TYPE | (var_meta->getArg() );   //it must be a function pointer
-       temp_node->pts = new std::set<PtrNode *>;    //when a call occurs, we use real_arg to initialize 
+       temp_node->type = ARG_TYPE | (var_meta->getArg() );  
+       //@TODO decide whether a param is psv or pmv, temparily init as psv
+       //temp_node->pmv = new std::set<PtrNode *>;
      }
      else {          //it is a local variable
-       //@TODO how to decide its type???
+       //must be psv
        temp_node->type = POINTER_TYPE;
-       temp_node->pts = new std::set<PtrNode *>;      //create pts for this node
-       //the var_value PtrNode exist, put it into var's pts directly
-       if(ptr_node_table.find(var_value_name) != ptr_node_table.end() ) {
-         temp_node->pts->insert(ptr_node_table.find(var_value_name)->second);
-       }
-       else {        //it must be a func addr or NULL,if it is a func addr, create a PtrNode for it
-         if(!var_value_name.empty() ) {   
-           PtrNode *func_ptr = new PtrNode;
-           func_ptr->id = var_value_name;           
-           ptr_node_table[func_ptr->id] = func_ptr;  
-           func_ptr->type = VALUE_TYPE;
-           func_ptr->pts = NULL;    //VALUE_TYPE has no pts
-           temp_node->pts->insert(func_ptr);
+       temp_node->psv = new PtrNode;         
+       if(!var_value_name.empty() ) {                           //point to NON_NULL value
+         //if it is a function addr, just initialize the temp_node, else we
+         //just set psv_name = var_value_name to do a logically "point to"
+         //we delay the physically "point to" to the computeGPTS stage. Because we need 
+         //PtrNode infomation of this value, which we can get at computeGPTS stage
+         if(gfuncs.find(var_value_name) != gfuncs.end() ) {     //it is a func addr
+           temp_node->psv_name = var_value_name;
+           temp_node->psv = gfuncs.find(var_value_name)->second;
+         }
+         else {
+           temp_node->psv_name = var_value_name;
          }
        }
      }
      temp_ipts->second->insert(temp_node);
      ipts_vec->push_back(temp_ipts);
-     //dump(temp_ipts);
    }
  }
  //deal with llvm.dbg.declare
@@ -337,16 +434,15 @@ private:
    std::string var_name = curr->getName();
    PtrNode *temp_node = new PtrNode;               
    temp_node->id = var_name;
-   temp_node->type = POINTER_TYPE;                 //Phinode must be PINTER_TYPE
-   temp_node->pts = new std::set<PtrNode *>;       //create pts for this node
-   //push the ptr node into ptr_node_table, node with same name need to further deal with
-   ptr_node_table[temp_node->id] = temp_node;       
+   temp_node->type = PHI_TYPE;                 //PHI_TYPE indicates it is pmv
+   temp_node->pmv = new std::set<PtrNode *>;
    for(int i = 0; i < phi->getNumIncomingValues(); ++i) {
       Value *phi_value = phi->getIncomingValue(i);
       std::string var_value_name = phi_value->getName();
       if(!var_value_name.empty() ) {      //deal with NON_NULL value
-        //all phi node values must have exist
-        temp_node->pts->insert(ptr_node_table.find(var_value_name)->second); 
+        //@TODO
+        temp_node->pmv_name.insert(var_value_name);
+        temp_node->pmv->insert(gfuncs[var_value_name]); 
       }
    }
    temp_ipts->second->insert(temp_node);
@@ -410,6 +506,7 @@ public:
    }
    visitor.computeGPTS(&pts_info);
    visitor.interProcedurePTSTransfer(&pts_info);
+   //visitor.printResult();
    pts_info.printGPTS();
    return false;
  }
