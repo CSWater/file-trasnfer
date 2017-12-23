@@ -16,6 +16,7 @@
 #include <set>
 #include <utility>
 #include <string>
+#include<cstdlib>
 using namespace llvm;
 
 #define VALUE_TYPE 1
@@ -36,6 +37,15 @@ struct PtrNode {
   std::set<std::string> pts_name;
   std::set<PtrNode *> *pts;
   PtrNode() : id(), type(0), pts_name(), pts(NULL){}
+  void dump() {
+    outs() << "id: " << id << "\n";
+    outs() << "type: " << type << "\n";
+    outs() << "pts_name size: " << pts_name.size() << "\n";
+    if(pts == NULL)
+      outs() << "pts is NULL\n";
+    else
+      outs() << "pts size: " << pts->size() << "\n";
+  }
 };
 //struct to denote a pts of an instruction
 typedef std::pair<Instruction *, std::set<PtrNode *> *> IPTS;
@@ -109,8 +119,12 @@ class PTSVisitor : public DataflowVisitor<struct PTSInfo> {
 private:
  //global function addr
  std::map<std::string, PtrNode *> gfuncs;
+ //global map of function name to function
+ std::map<std::string, Function *> func_name_to_func;
  //global base addr. get by AllocaInst and malloc function
  std::map<Function *, std::map<std::string, BaseAddr *> > gaddr;
+ //load type variable alia name, for load variable may be unnamed temprary
+ std::map<LoadInst *, std::string> load_variable_name;
  //store all the call inst to help inter procedure PTS analysis
  std::vector<Instruction *> call_inst_vec;
  //store result
@@ -132,12 +146,16 @@ public :
  void computeIPTS(Instruction *curr, std::vector<IPTS *> *ipts_vec, std::set<AddrAlia *> *addr_alias);
  //print result
  void printResult();
+ //get point to function from given PtrNode
+ void getFuncFromPtr(std::set<std::string> &func, PtrNode *ptr);
+ //generate name for unnamed variable, i.e load inst
+ void generateName(LoadInst *load_inst);
  
 private:
  //get real arg from called, if changed gpts, return 1
  int getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gpts);
  //transfer the arg PtrNode to the called func
- void transferParamToFunc(PtrNode *arg, int index, FPTS *fpts);
+ void transferParamToFunc(std::vector<PtrNode *> &args, std::vector<int> index, FPTS *fpts);
  //merge
  void merge(IPTS *dest, IPTS *src);
  //deal with llvm.dbg.value
@@ -164,13 +182,15 @@ private:
 void PTSVisitor::computePTS(Function *F, PTSInfo *pts_info) {
   if(F->isIntrinsic() ) 
     return;
-  //add global information to gfuncs and gaddr
+  //add global information to gfuncs, gaddr, func_name_to_func;
+  //outs() << F->getName() << "\n";
   PtrNode *func_ptr = new PtrNode;
   func_ptr->id = F->getName();
   func_ptr->type = VALUE_TYPE;
   gfuncs[F->getName()] = func_ptr;
   std::map<std::string, BaseAddr *> base_addrs;
   gaddr[F] = base_addrs;
+  func_name_to_func[F->getName()] = F;
   //create FPTS andaddr alias  for the function
   FPTS *fpts = new FPTS;
   std::set<AddrAlia *> *addr_alias = new std::set<AddrAlia *>;
@@ -215,7 +235,7 @@ void PTSVisitor::computeGPTS(PTSInfo *gpts_info) {
               merge(cur_ipts, pre_ipts);
             }
             else {
-              outs() << "merge error! pre BPTS is empty\n";
+              errs() << "merge error! pre BPTS is empty\n";
             }
           }
         }
@@ -228,16 +248,15 @@ void PTSVisitor::computeGPTS(PTSInfo *gpts_info) {
   }
 }
 //calculate PTS inter procudure
-void PTSVisitor::interProcedurePTSTransfer(PTSInfo *gpts) {
-  computeGPTS(gpts);
-  int flag = 1;
-  flag = 0;
+void PTSVisitor::interProcedurePTSTransfer(PTSInfo *gpts_info) {
+  computeGPTS(gpts_info);
   for(auto iter = call_inst_vec.rbegin(); iter != call_inst_vec.rend(); ++iter) {
-    IPTS *curr_ipts = getIPTS(*iter, gpts);
+    IPTS *curr_ipts = getIPTS(*iter, gpts_info);
     CallInst *call_inst = cast<CallInst>(*iter);
-    getParamsFromCalled(call_inst, curr_ipts, gpts);
-    //computeResult(gpts);
+    getParamsFromCalled(call_inst, curr_ipts, gpts_info);
   }
+  outs() << "called computeResult at line " << __LINE__ << "\n";
+  computeResult(gpts_info);
 }
 //calculate function call information
 void PTSVisitor::computeResult(PTSInfo *gpts) {
@@ -252,18 +271,30 @@ void PTSVisitor::computeResult(PTSInfo *gpts) {
       Value *call = call_inst->getCalledValue();
       std::string ptr_name = call->getName();
       IPTS *ipts = getIPTS(temp.inst, gpts);
-      PtrNode *me = NULL;
+      if(ptr_name.empty() ) {             //an unnamed ptr, i.e like %1
+        if(load_variable_name.find(cast<LoadInst>(call) ) != load_variable_name.end() ) {
+          ptr_name = load_variable_name[cast<LoadInst>(call)]; 
+        }
+        else {
+          errs() << __LINE__ << ": Error001! Unrecongized unnamed call ptr\n";
+        }
+      }
+      PtrNode *called_ptr = NULL;
       for(auto iter2 = ipts->second->begin(); iter2 != ipts->second->end(); ++iter2) {
-        if(!ptr_name.compare((*iter2)->id) ) {
-          me = *iter2;
+        if(ptr_name.compare((*iter2)->id) == 0 ) {
+          called_ptr = *iter2;
           break;
         }
       }
-      bool flag = true;
-      for(auto iter3 = me->pts->begin(); iter3 != me->pts->end(); ++iter3) {
-        if((*iter3)->type == VALUE_TYPE) {
-          temp.name.insert((*iter3)->id);        
-        }
+      if(called_ptr == NULL) {
+        errs() << "error! Can not find called function\n";
+        exit(-1);
+      }
+      std::set<std::string> func_name;
+      getFuncFromPtr(func_name, called_ptr);
+      for(auto iter3 = func_name.begin(); iter3 != func_name.end(); ++iter3) {
+        outs() << *iter3 << "\n";
+        temp.name.insert(*iter3);
       }
     }
   }
@@ -291,7 +322,7 @@ void PTSVisitor::computeIPTS(Instruction *curr, std::vector<IPTS *> *ipts_vec, s
         case Intrinsic::dbg_declare: dealWithIntrisicDeclare(curr, ipts_vec);
                                      break;
         case Intrinsic::memset: break;                   
-        default:                     outs() << "unrecognized intrinsic error\n";
+        default:                     errs() << "unrecognized intrinsic error\n";
                                      call_inst->getCalledFunction()->dump();
       }
     }
@@ -320,9 +351,6 @@ void PTSVisitor::computeIPTS(Instruction *curr, std::vector<IPTS *> *ipts_vec, s
   else if(IS("load") ) {
     dealWithLoad(curr, ipts_vec, addr_alias);
   }
-  //else {       //deal with instructions that will not change pts
-  //  dealWithOtherInst(curr, ipts_vec);
-  //}
 }
 //print result
 void PTSVisitor::printResult() {
@@ -337,6 +365,32 @@ void PTSVisitor::printResult() {
     out.resize(out.length() - 2);
     errs() << out << "\n";
   }
+}
+//get point to function from given PtrNode
+void PTSVisitor::getFuncFromPtr(std::set<std::string> &func, PtrNode *ptr) {
+  if(ptr->type == VALUE_TYPE) {
+    func.insert(ptr->id);
+    return;
+  }
+  if(ptr->pts->empty() ) {
+    errs() << "Error000! Empty PtrNode error\n";
+    errs() << ptr->id << " : pts is empty\n";
+    exit(-1);
+  }
+  for(auto iter = ptr->pts->begin(); iter != ptr->pts->end(); ++iter) {
+    outs() << "pts : " << (*iter)->id << "\n";
+    getFuncFromPtr(func, *iter);
+  }
+}
+//generate name for unnamed variable
+void PTSVisitor::generateName(LoadInst *load_inst) {
+  static int ID = 0;
+  char id[10];
+  std::string name("load");
+  sprintf(id, "%d", ID);
+  name.append(id);
+  load_variable_name[load_inst] = name; 
+  ID++;
 }
 //get the inst's IPTS
 IPTS* PTSVisitor::getIPTS(Instruction *inst, PTSInfo *gpts) {
@@ -368,60 +422,139 @@ IPTS* PTSVisitor::getIPTS(Instruction *inst, PTSInfo *gpts) {
 }
 //get real arg from called, if changed gpts, return 1
 int PTSVisitor::getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gpts) {
-  if(Function *func = call_inst->getCalledFunction() ) {       //direct function call
+  //get called Function
+  std::set<Function *> called_func_set;
+  if(Function *func = call_inst->getCalledFunction() ) {
+    called_func_set.insert(func);                           //direct function call
+  }
+  else {                                                       //indirect function call
+    Value *called_value = call_inst->getCalledValue();
+    std::string called_name = called_value->getName();
+    if(called_name.empty() ) {                      //unnamed ptr, like %1 = load ..., it is a load value
+      if(LoadInst *load_inst = dyn_cast<LoadInst>(called_value) ) {
+        called_name = load_variable_name[load_inst];        //get the generated name
+      }
+      else {                                        //should not happen
+        errs() << "unrecongized unnamed variable error!\n";
+      }
+    }
+    //get the called_value PtrNode
+    PtrNode *called_ptr = NULL;
+    for(auto iter = ipts->second->begin(); iter != ipts->second->end(); ++iter) {
+      if((*iter)->id.compare(called_name) == 0) {
+        called_ptr = *iter;
+        //called_ptr->dump();
+        break;
+      }
+    }
+    std::set<std::string> func_name;
+    //get the called function and do param tranfer for each may-called-func
+    getFuncFromPtr(func_name, called_ptr);
+    for(auto iter1 = func_name.begin(); iter1 != func_name.end(); ++iter1) {
+      called_func_set.insert(func_name_to_func[*iter1]);
+    }
+  }
+  //for(auto iter = called_func_set.begin(); iter != called_func_set.end(); ++iter) {
+  //  outs() << (*iter)->getName() << "\n";
+  //}
+  //get real arg from each function call instance
+  for(auto func_iter = called_func_set.begin(); func_iter != called_func_set.end(); ++func_iter) {
+    Function *func = *func_iter;
+    std::vector<PtrNode *> args;                                 //arg list
+    std::vector<int> args_index;                                 //arg index
+    //get the called func's FPTS
+    FPTS *fpts = NULL;
+    for(auto iter = gpts->gpts.begin(); iter != gpts->gpts.end(); ++iter) {
+      if(func == (*iter)->first) {
+        fpts = *iter;
+        break;
+      }
+    }
+    if(fpts == NULL) {          //should not happen
+      errs() << "error! Can not find called Function!\n";
+      exit(-1);
+    }
+    //get the args
     unsigned num = call_inst->getNumArgOperands();
     for(int i = 0; i < num; ++i) {
       Value *arg = call_inst->getArgOperand(i);
+      //only need to deal with function pointer parameters
       if(arg->getType()->isPointerTy() ) {
-        //get the called func's FPTS
-        FPTS *fpts = NULL;
-        for(auto iter = gpts->gpts.begin(); iter != gpts->gpts.end(); ++iter) {
-          if(func == (*iter)->first) {
-            fpts = *iter;
-            break;
-          }
-        }
         std::string arg_name = arg->getName();
-        PtrNode *arg_ptr_node = NULL;
+        //outs() << "arg name:" << arg_name << "\n";
         if(gfuncs.find(arg_name) != gfuncs.end() ) {         //func addr as param
-          arg_ptr_node = gfuncs.find(arg_name)->second;
+          outs() << "func addr as param\n";
+          args.push_back(gfuncs.find(arg_name)->second);
+          args_index.push_back(i);
         }
         else {                                               //func ptr as param
+          outs() << "func ptr as param\n";
           for(auto it = ipts->second->begin(); it != ipts->second->end(); ++it) {
-            if(!arg_name.compare((*it)->id) ) {
-              arg_ptr_node = *it;
+            if(arg_name.compare((*it)->id) == 0) {
+              //outs() << (*it)->id << "\n";
+              args.push_back(*it);
+              args_index.push_back(i);
+              break;
             }
           }
         }
-        transferParamToFunc(arg_ptr_node, i, fpts);
       }
     }
-  }
-  else {                                                       //indirect function call
-    //@TODO
+    if(args.size() != 0) {
+      if(args.size() != args_index.size() ) {
+        errs() << "param transfer error!\n";
+        exit(-1); 
+      }
+      //outs() << "call transferParamToFunc\n";
+      //for(auto iter = args.begin(); iter != args.end(); ++iter) {
+      //  outs() << "arg: " << (*iter)->id << "\n";
+      //}
+      transferParamToFunc(args, args_index, fpts);
+      outs() << "called computeResult at line " << __LINE__ << "\n";
+      computeResult(gpts);
+    }
   }
   return 0;
 }
 //transfer the arg PtrNode to the called func
-void PTSVisitor::transferParamToFunc(PtrNode *arg, int index, FPTS *fpts) {
+void PTSVisitor::transferParamToFunc(std::vector<PtrNode *> &args, std::vector<int> args_index, FPTS *fpts) {
   //the arg must in the entry block
   BPTS *entry_bpts = fpts->second->front();
-  for(auto iteri = entry_bpts->second->begin(); iteri != entry_bpts->second->end(); ++iteri) {
-    IPTS *ipts = *iteri;
-    for(auto iter = ipts->second->begin(); iter != ipts->second->end(); ++iter) {
-       PtrNode *param = *iter;
-       if((param->type & 0x80 ) &&(param->type & 0xf) == (index + 1) ) {  //index start at 0, but argNO start at 1
-         //delete the old call inst arg
-         param->pts_name.clear();
-         param->pts->clear();
-         //pass the new arg
-         param->pts_name.insert(arg->id);
-         param->pts->insert(arg);
-         outs() << "\n" << arg->id << " transfer complete!\n";
-         return;
-       }
+  //transfer the args list to the param list
+  auto iter1 = args.begin();
+  auto iter2 = args_index.begin();
+  for( ;iter1 != args.end(); ++iter1, ++iter2) {
+    //outs() << "here1\n";
+    bool completed = false;
+    PtrNode *arg = *iter1;
+    int index = *iter2;
+    for(auto iteri = entry_bpts->second->begin(); iteri != entry_bpts->second->end(); ++iteri) {
+      //outs() << "here2\n";
+      IPTS *ipts = *iteri;
+      for(auto iter = ipts->second->begin(); iter != ipts->second->end(); ++iter) {
+        //outs() << "here3\n";
+        PtrNode *param = *iter;
+        if((param->type & 0x80 ) &&(param->type & 0xf) == (index + 1) ) {  //index start at 0, but argNO start at 1
+          //outs() << "here4\n";
+          //delete the old call inst arg
+          param->pts_name.clear();
+          param->pts->clear();
+          //outs() << "here5\n";
+          //pass the new arg
+          param->pts_name.insert(arg->id);
+          param->pts->insert(arg);
+          outs() << arg->id << " transfer complete!\n";
+          completed = true;
+          break;
+        }
+      }
+      if(completed){
+        //outs() << "here6\n";
+        break;
+      }
     }
   }
+  //outs() << "transfer over!\n";
 }
 //merge the IPTS of two successive inst
 //two stages
@@ -440,8 +573,9 @@ void PTSVisitor::merge(IPTS *dest, IPTS *src) {
     PtrNode *temp = *iters;
     bool new_var = true;
     for(auto iterd = dest_pts->begin(); iterd != dest_pts->end(); ++iterd) {
-      if(!temp->id.compare((*iterd)->id) ) {    
+      if(temp->id.compare((*iterd)->id) == 0) {    
         new_var = false;
+        break;
       }
     }
     if(new_var) {
@@ -451,12 +585,14 @@ void PTSVisitor::merge(IPTS *dest, IPTS *src) {
   //stage 2 merge
   for(auto iter1 = dest_pts->begin(); iter1 != dest_pts->end(); ++iter1) {
     PtrNode *temp = *iter1;
-    if(temp->pts->empty() ) {
-      for(auto iter1 = temp->pts_name.begin(); iter1 != temp->pts_name.end(); ++iter1) {
-        std::string ptr_name = *iter1;
-        for(auto iter2 = dest_pts->begin(); iter2 != dest_pts->end(); ++iter2) {
-          if(ptr_name.compare((*iter2)->id) ) {
-            temp->pts->insert(*iter2);
+    if(temp->pts->size() != temp->pts_name.size() ) {
+      for(auto iter2 = temp->pts_name.begin(); iter2 != temp->pts_name.end(); ++iter2) {
+        std::string ptr_name = *iter2;
+        if(gfuncs.find(ptr_name) != gfuncs.end() )  //any func addr must have been physically linked to the object PtrNode
+          continue;
+        for(auto iter3 = dest_pts->begin(); iter3 != dest_pts->end(); ++iter3) {
+          if(ptr_name.compare((*iter3)->id) ) {
+            temp->pts->insert(*iter3);
             break;
           }
         }
@@ -524,9 +660,10 @@ void PTSVisitor::dealWithPhi(Instruction *curr, std::vector<IPTS *> *ipts_vec) {
      Value *phi_value = phi->getIncomingValue(i);
      std::string var_value_name = phi_value->getName();
      if(!var_value_name.empty() ) {      //deal with NON_NULL value
-       //@TODO
-       temp_node->pts_name.insert(var_value_name);
-       temp_node->pts->insert(gfuncs[var_value_name]); 
+       //logically point to, if it is not a func ptrnode, do physically point to when merge
+       temp_node->pts_name.insert(var_value_name);       
+       if(gfuncs.find(var_value_name) != gfuncs.end() )            //it is a func addr, physically point to
+         temp_node->pts->insert(gfuncs.find(var_value_name)->second); 
      }
   }
   IPTS *temp_ipts = new IPTS;      //create IPTS for curr inst
@@ -560,7 +697,6 @@ void PTSVisitor::dealWithAlloca(Instruction *curr) {
     base->elements.push_back(store_op);
   }
   gaddr[func][name] = base;
-  outs() << name << " length: " << len << "\n";
 }
 //deal with getElementPtr inst
 void PTSVisitor::dealWithGetElementPtr(Instruction *curr, std::set<AddrAlia *> *addr_alias) {
@@ -575,8 +711,6 @@ void PTSVisitor::dealWithGetElementPtr(Instruction *curr, std::set<AddrAlia *> *
      alia->index = cast<ConstantInt>(get_ptr->getOperand(i) )->getZExtValue(); 
   }
   addr_alias->insert(alia);
-  outs() << "base : " << alia->base << "num of index : " << index_num << "\n";
-
 }
 //deal with store inst
 void PTSVisitor::dealWithStore(Instruction *curr, std::vector<IPTS *> *ipts_vec, std::set<AddrAlia *> *addr_alias) {
@@ -595,15 +729,13 @@ void PTSVisitor::dealWithStore(Instruction *curr, std::vector<IPTS *> *ipts_vec,
     base_name = alia->base;
   }
   else {            //should not occur
-    outs() << "unrecongnized addr alia error!\n";
+    errs() << "unrecongnized addr alia error!\n";
   }
-  outs() << "alia : " << alia->name << " base: " << alia->base << "\n";
   Function *func = curr->getFunction();
   base = gaddr[func][base_name];
   if(base == NULL) {
-    outs() << "error! can not find the base addr\n";
+    errs() << "error! can not find the base addr\n";
   }
-  outs() << "base : " << base_name << " index : " << alia->index << "\n";
   if(base->elements[alia->index].empty() ) {
     base->elements[alia->index].push_back(store_inst);
   } 
@@ -634,10 +766,13 @@ void PTSVisitor::dealWithStore(Instruction *curr, std::vector<IPTS *> *ipts_vec,
 //deal with load inst
 void PTSVisitor::dealWithLoad(Instruction *curr, std::vector<IPTS *> *ipts_vec, std::set<AddrAlia *> *addr_alias) {
   LoadInst *load_inst = cast<LoadInst>(curr);
+  //generate a name for the unname load value
+  generateName(load_inst);
   std::string alia_name = load_inst->getPointerOperand()->getName();
   std::string base_name;
   BaseAddr *base = NULL;
   AddrAlia *alia = NULL;
+  //get alia, it must have been occur in a store inst or it is an error
   for(auto iter = addr_alias->begin(); iter != addr_alias->end(); ++iter) {
     if(!alia_name.compare((*iter)->name) ) {
       alia = *iter; 
@@ -645,30 +780,47 @@ void PTSVisitor::dealWithLoad(Instruction *curr, std::vector<IPTS *> *ipts_vec, 
     }
   }
   if(alia != NULL) {
+    //get base
     base_name = alia->base;
+    Function *func = curr->getFunction();
+    base = gaddr[func][base_name];
   }
   else {            //should not occur
-    outs() << "unrecongnized addr alia error!\n";
+    errs() << __LINE__ << ": Error002! Unrecongnized addr alia error!\n";
+    exit(-1);
   }
-  Function *func = curr->getFunction();
-  base = gaddr[func][base_name];
-  if(base == NULL) {
-    outs() << "error! can not find the base addr\n";
+  if(base == NULL) {   //should not occur
+    errs() << __LINE__ << "Error003! Can not find the base addr\n";
+    exit(-1);
   }
- for(auto iter = base->elements[alia->index].begin(); iter != base->elements[alia->index].end(); ++iter) {
-   outs() << "\nmay load:\n";
-   (*iter)->dump();
- }
+ //for(auto iter = base->elements[alia->index].begin(); iter != base->elements[alia->index].end(); ++iter) {
+ //  outs() << "\nmay load:\n";
+ //  (*iter)->dump();
+ //}
  PtrNode *load_value = new PtrNode;
- load_value->id = curr->getName();
+ if(curr->getName().empty() ) {     //load value is unnamed
+   load_value->id = load_variable_name[load_inst];
+ }
+ else {
+   load_value->id = curr->getName();    //load value is named
+ }
  load_value->type = POINTER_TYPE;
  load_value->pts = new std::set<PtrNode *>;
+ //@TODO uncertain if store value can really pass to load
+ //there may be cases that the store value can not find because it is not passed along the way
+ //and we can not do a right phycally point to
  for(auto iter = base->elements[alia->index].begin(); iter != base->elements[alia->index].end(); ++iter) {
    StoreInst *store_inst = *iter;
    std::string ptr_name = store_inst->getValueOperand()->getName();
+   //do a logically point to
    load_value->pts_name.insert(ptr_name);
+   //it ia a func PtrNode, do a physically point to
+   if(gfuncs.find(ptr_name) != gfuncs.end() ) {
+     load_value->pts->insert(gfuncs.find(ptr_name)->second);
+   }
  }
- outs() << "load value:";
+ outs() << "load value:\n";
+ load_value->dump();
  for(auto iter = load_value->pts_name.begin(); iter != load_value->pts_name.end(); ++iter) {
    outs() << *iter << "\t";
  }
@@ -696,17 +848,9 @@ public:
    }
    visitor.computeGPTS(&pts_info);
    visitor.interProcedurePTSTransfer(&pts_info);
-   //visitor.printResult();
+   visitor.printResult();
    //pts_info.printGPTS();
    return false;
- }
-
- void showResult(std::vector<Instruction *> &result) {
-   outs() << "call inst:\n";
-   for(auto iter = result.begin(); iter != result.end(); ++iter) {
-      outs() << (*iter)->getDebugLoc()->getLine() << " : ";
-      (*iter)->dump();
-   }
  }
 
 };
