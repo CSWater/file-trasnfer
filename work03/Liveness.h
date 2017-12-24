@@ -61,6 +61,10 @@ struct BaseAddr {
   unsigned len;                                     //the number of elements
   std::vector<std::vector<StoreInst *> > elements;   //use store op to record the newest value of the addr
   BaseAddr() : id(), len(-1), elements() {}
+  void dump() {
+    outs() << "id: " << id << "\n";
+    outs() << "len: " << len << "\n";
+  }
 };
 
 //alia of a addr
@@ -69,6 +73,11 @@ struct AddrAlia {
   std::string base;                                 //alia of which base
   unsigned index;                                   //along with base to lacate the real addr
   AddrAlia() : name(), base(), index(-1) {}
+  void dump() {
+    outs() << "alia name: " << name << "\n";
+    outs() << "base: " << base << "\n";
+    outs()  << "index: " << index << "\n";
+  }
 };
 
 void dump(IPTS *ipts) {
@@ -150,6 +159,11 @@ public :
  void getFuncFromPtr(std::set<std::string> &func, PtrNode *ptr);
  //generate name for unnamed variable, i.e load inst
  void generateName(LoadInst *load_inst);
+ //find the relationship of two given blocks, ckeck if the first dominate the second
+ //ought to generate dominator tree, but I am tired to this now and llvm has this function
+ //but I ca not use in this homework, it is of no use bothering to do this
+ bool isDominated(BasicBlock *father, BasicBlock *son);
+ bool findWayToEntry(BasicBlock *entry, BasicBlock *me, BasicBlock *father);
  
 private:
  //get real arg from called, if changed gpts, return 1
@@ -174,6 +188,8 @@ private:
  void dealWithStore(Instruction *curr, std::vector<IPTS *> *ipts_vec, std::set<AddrAlia *> *addr_alias);
  //deal with load inst
  void dealWithLoad(Instruction *curr, std::vector<IPTS *> *ipts_vec, std::set<AddrAlia *> *addr_alias);
+ //deal with instructions that will not change pts
+ void dealWithOthers(Instruction *curr, std::vector<IPTS *> *ipts_vec);
  //get the inst's IPTS
  IPTS *getIPTS(Instruction *inst, PTSInfo *gpts);
 };
@@ -222,6 +238,7 @@ void PTSVisitor::computeGPTS(PTSInfo *gpts_info) {
         //the first inst of a block, its pre inst is the last inst of the pre block
         else if(iteri == bpts->second->begin() ) {
           BasicBlock *block = bpts->first;
+          //there is also succ_begin() / succ_end(), remember for later use
           for(auto pre = pred_begin(block); pre != pred_end(block); ++pre) {
             BasicBlock *pre_block = (*pre);
             //get the BPTS of pre_block
@@ -235,7 +252,7 @@ void PTSVisitor::computeGPTS(PTSInfo *gpts_info) {
               merge(cur_ipts, pre_ipts);
             }
             else {
-              errs() << "merge error! pre BPTS is empty\n";
+              //errs() << "merge error! pre BPTS is empty\n";
             }
           }
         }
@@ -335,7 +352,7 @@ void PTSVisitor::computeIPTS(Instruction *curr, std::vector<IPTS *> *ipts_vec, s
       dealWithCall(curr, ipts_vec);
     }
   }
-  //@TODO deal with instructions that may change pts, like phi
+  //deal with instructions that may change pts, like phi
   else if(IS("phi") ) {
     dealWithPhi(curr, ipts_vec);
   }
@@ -350,6 +367,9 @@ void PTSVisitor::computeIPTS(Instruction *curr, std::vector<IPTS *> *ipts_vec, s
   }
   else if(IS("load") ) {
     dealWithLoad(curr, ipts_vec, addr_alias);
+  }
+  else {                                //deal with instructions that will not change pts
+    dealWithOthers(curr, ipts_vec);
   }
 }
 //print result
@@ -366,7 +386,7 @@ void PTSVisitor::printResult() {
     errs() << out << "\n";
   }
 }
-//get point to function from given PtrNode
+//get pointed to function from given PtrNode
 void PTSVisitor::getFuncFromPtr(std::set<std::string> &func, PtrNode *ptr) {
   if(ptr->type == VALUE_TYPE) {
     func.insert(ptr->id);
@@ -381,6 +401,10 @@ void PTSVisitor::getFuncFromPtr(std::set<std::string> &func, PtrNode *ptr) {
     outs() << "pts : " << (*iter)->id << "\n";
     getFuncFromPtr(func, *iter);
   }
+  //for(auto iter = ptr->pts_name.begin(); iter != ptr->pts_name.end(); ++iter) {
+  //  outs() << "pts_name : " << *iter << "\n";
+  //  //getFuncFromPtr(func, *iter);
+  //}
 }
 //generate name for unnamed variable
 void PTSVisitor::generateName(LoadInst *load_inst) {
@@ -392,6 +416,30 @@ void PTSVisitor::generateName(LoadInst *load_inst) {
   load_variable_name[load_inst] = name; 
   ID++;
 }
+
+//judge if father dominates son
+bool PTSVisitor::isDominated(BasicBlock *father, BasicBlock *son) {
+  if(father->getParent() != son->getParent() ) {
+    errs() << __LINE__ << ": Error007! Can not judge relationship of blocks of different funtion.\n";
+  }
+  Function *F = father->getParent();
+  BasicBlock *entry = &(F->getEntryBlock());
+  if(findWayToEntry(entry, son, father) )
+    return false;
+  return true;     
+}
+//may be wrong... I am to tired, it's 3 o'clock in morning now
+bool PTSVisitor::findWayToEntry(BasicBlock *entry, BasicBlock *me, BasicBlock *father) {
+  if(me == entry) {
+    return true;
+  }
+  for(auto pre = pred_begin(me); pre != pred_end(me); ++pre) {
+    if(*pre != father)
+      return findWayToEntry(entry, *pre, father);
+  }
+  return false;
+}
+
 //get the inst's IPTS
 IPTS* PTSVisitor::getIPTS(Instruction *inst, PTSInfo *gpts) {
   Function *func = inst->getFunction();   
@@ -443,12 +491,12 @@ int PTSVisitor::getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gp
     for(auto iter = ipts->second->begin(); iter != ipts->second->end(); ++iter) {
       if((*iter)->id.compare(called_name) == 0) {
         called_ptr = *iter;
-        //called_ptr->dump();
         break;
       }
     }
     std::set<std::string> func_name;
     //get the called function and do param tranfer for each may-called-func
+    //called_ptr->dump();
     getFuncFromPtr(func_name, called_ptr);
     for(auto iter1 = func_name.begin(); iter1 != func_name.end(); ++iter1) {
       called_func_set.insert(func_name_to_func[*iter1]);
@@ -587,14 +635,19 @@ void PTSVisitor::merge(IPTS *dest, IPTS *src) {
     PtrNode *temp = *iter1;
     if(temp->pts->size() != temp->pts_name.size() ) {
       for(auto iter2 = temp->pts_name.begin(); iter2 != temp->pts_name.end(); ++iter2) {
+        bool flag = false;
         std::string ptr_name = *iter2;
         if(gfuncs.find(ptr_name) != gfuncs.end() )  //any func addr must have been physically linked to the object PtrNode
           continue;
         for(auto iter3 = dest_pts->begin(); iter3 != dest_pts->end(); ++iter3) {
-          if(ptr_name.compare((*iter3)->id) ) {
+          if(ptr_name.compare((*iter3)->id) == 0) {
             temp->pts->insert(*iter3);
+            flag = true;
             break;
           }
+        }
+        if(!flag) {
+          errs() << __LINE__ << ": Error008! Can find object PtrNode in the IPTS when merge stage 2.\n";
         }
       }
     }
@@ -687,9 +740,11 @@ void PTSVisitor::dealWithAlloca(Instruction *curr) {
   Function *func = curr->getFunction();
   std::string name = curr->getName();          //addr name
   AllocaInst *alloca = cast<AllocaInst>(curr);
-  unsigned len = cast<ConstantInt>(alloca->getArraySize() )->getZExtValue();
+  unsigned len = alloca->getAllocatedType()->getArrayNumElements();
+  //cast<ConstantInt>(alloca->getArraySize() )->getZExtValue();
   base->id = name;
   base->len = len;
+  //outs() << "init len:" << len << "\n";
   std::vector<std::vector<StoreInst *> > elements;
   base->elements = elements;
   for(int i = 0; i < len; ++i) {
@@ -712,13 +767,17 @@ void PTSVisitor::dealWithGetElementPtr(Instruction *curr, std::set<AddrAlia *> *
   }
   addr_alias->insert(alia);
 }
+
 //deal with store inst
 void PTSVisitor::dealWithStore(Instruction *curr, std::vector<IPTS *> *ipts_vec, std::set<AddrAlia *> *addr_alias) {
   StoreInst *store_inst = cast<StoreInst>(curr);
+  outs() << "store inst:";
+  store_inst->dump();
   std::string alia_name = store_inst->getPointerOperand()->getName();
   std::string base_name;
   BaseAddr *base = NULL;
   AddrAlia *alia = NULL;
+  //get alia
   for(auto iter = addr_alias->begin(); iter != addr_alias->end(); ++iter) {
     if(!alia_name.compare((*iter)->name) ) {
       alia = *iter; 
@@ -726,15 +785,18 @@ void PTSVisitor::dealWithStore(Instruction *curr, std::vector<IPTS *> *ipts_vec,
     }
   }
   if(alia != NULL) {
+    //get base
     base_name = alia->base;
+    Function *func = curr->getFunction();
+    base = gaddr[func][base_name];
   }
-  else {            //should not occur
-    errs() << "unrecongnized addr alia error!\n";
+  else {       //should not occur
+    errs() << __LINE__ << ": Error005! Unrecongized alia error when store.\n";
+    exit(-1);
   }
-  Function *func = curr->getFunction();
-  base = gaddr[func][base_name];
-  if(base == NULL) {
-    errs() << "error! can not find the base addr\n";
+  if(base == NULL) {    //should not occur
+    errs() << __LINE__ << ": Error006! can not find the base addr when store.\n";
+    exit(-1);
   }
   if(base->elements[alia->index].empty() ) {
     base->elements[alia->index].push_back(store_inst);
@@ -744,27 +806,25 @@ void PTSVisitor::dealWithStore(Instruction *curr, std::vector<IPTS *> *ipts_vec,
   //else just cover the before store inst
   else {
     BasicBlock *b1 = store_inst->getParent();
+    //(base->elements[alia->index].back())->dump();
     BasicBlock *b2 = base->elements[alia->index].back()->getParent();
-    if(b1 == b2 || b1->getSinglePredecessor() == NULL || b1->getSinglePredecessor() == b2) {
+    if(b1 == b2 || b1->getSinglePredecessor() == b2) {
       base->elements[alia->index].clear();
       base->elements[alia->index].push_back(store_inst);
     }
     else {
       base->elements[alia->index].push_back(store_inst);
-      //for(auto iter = base->elements[alia->index].begin(); iter != base->elements[alia->index].end(); ++iter) {
-      //  outs() << "\nmay store:\n";
-      //  (*iter)->dump();
-      //}
     }
   }
- // IPTS *temp_ipts = new IPTS;      //create IPTS for curr inst
- // temp_ipts->first = curr;
- // temp_ipts->second = new std::set<PtrNode *>;
- // ipts_vec->push_back(temp_ipts);
+  IPTS *temp_ipts = new IPTS;      //create IPTS for curr inst
+  temp_ipts->first = curr;
+  temp_ipts->second = new std::set<PtrNode *>;
+  ipts_vec->push_back(temp_ipts);
 }
 
 //deal with load inst
 void PTSVisitor::dealWithLoad(Instruction *curr, std::vector<IPTS *> *ipts_vec, std::set<AddrAlia *> *addr_alias) {
+  outs() << "load start\n";
   LoadInst *load_inst = cast<LoadInst>(curr);
   //generate a name for the unname load value
   generateName(load_inst);
@@ -786,17 +846,13 @@ void PTSVisitor::dealWithLoad(Instruction *curr, std::vector<IPTS *> *ipts_vec, 
     base = gaddr[func][base_name];
   }
   else {            //should not occur
-    errs() << __LINE__ << ": Error002! Unrecongnized addr alia error!\n";
+    errs() << __LINE__ << ": Error002! Unrecongnized addr alia error when load.\n";
     exit(-1);
   }
   if(base == NULL) {   //should not occur
-    errs() << __LINE__ << "Error003! Can not find the base addr\n";
+    errs() << __LINE__ << "Error003! Can not find the base addr when load.\n";
     exit(-1);
   }
- //for(auto iter = base->elements[alia->index].begin(); iter != base->elements[alia->index].end(); ++iter) {
- //  outs() << "\nmay load:\n";
- //  (*iter)->dump();
- //}
  PtrNode *load_value = new PtrNode;
  if(curr->getName().empty() ) {     //load value is unnamed
    load_value->id = load_variable_name[load_inst];
@@ -811,16 +867,30 @@ void PTSVisitor::dealWithLoad(Instruction *curr, std::vector<IPTS *> *ipts_vec, 
  //and we can not do a right phycally point to
  for(auto iter = base->elements[alia->index].begin(); iter != base->elements[alia->index].end(); ++iter) {
    StoreInst *store_inst = *iter;
-   std::string ptr_name = store_inst->getValueOperand()->getName();
+   Value *store_value = store_inst->getValueOperand();
+   std::string ptr_name = store_value->getName();
+   if(ptr_name.empty() ) {    //that means we have store a unnamed variable, i.e a value from loaded
+     store_inst->dump();
+     if(LoadInst *temp_load = dyn_cast<LoadInst>(store_value) ) {
+       ptr_name = load_variable_name[temp_load];
+       outs() << "ptr_name:" << ptr_name << "\n";
+       
+     }
+     else {
+       errs() << __LINE__ << ": Error004! Unrecongnized load value.\n";
+       exit(-1);
+     }
+   }
    //do a logically point to
    load_value->pts_name.insert(ptr_name);
+   outs() << load_value->id << " : " << ptr_name << "\n";
    //it ia a func PtrNode, do a physically point to
    if(gfuncs.find(ptr_name) != gfuncs.end() ) {
      load_value->pts->insert(gfuncs.find(ptr_name)->second);
    }
  }
- outs() << "load value:\n";
- load_value->dump();
+ //outs() << "load value:\n";
+ //load_value->dump();
  for(auto iter = load_value->pts_name.begin(); iter != load_value->pts_name.end(); ++iter) {
    outs() << *iter << "\t";
  }
@@ -830,6 +900,17 @@ void PTSVisitor::dealWithLoad(Instruction *curr, std::vector<IPTS *> *ipts_vec, 
  temp_ipts->second = new std::set<PtrNode *>;
  temp_ipts->second->insert(load_value);
  ipts_vec->push_back(temp_ipts);
+ load_value->dump();
+ outs() << "load end\n";
+}
+
+//deal with instructions that will not change pts
+void PTSVisitor::dealWithOthers(Instruction *curr, std::vector<IPTS *> *ipts_vec) {
+  //do nothing, just create a empty IPTS, and at merge stage, inherite from its pres 
+  IPTS *temp_ipts = new IPTS;
+  temp_ipts->first = curr;
+  temp_ipts->second = new std::set<PtrNode *>;
+  ipts_vec->push_back(temp_ipts);
 }
 class Liveness : public ModulePass {
 public:
