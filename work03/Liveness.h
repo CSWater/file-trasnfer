@@ -133,7 +133,7 @@ private:
  //global base addr. get by AllocaInst and malloc function
  std::map<Function *, std::map<std::string, BaseAddr *> > gaddr;
  //load type variable alia name, for load variable may be unnamed temprary
- std::map<LoadInst *, std::string> load_variable_name;
+ std::map<Instruction *, std::string> unnamed_variable_name;
  //store all the call inst to help inter procedure PTS analysis
  std::vector<Instruction *> call_inst_vec;
  //store result
@@ -158,7 +158,7 @@ public :
  //get point to function from given PtrNode
  void getFuncFromPtr(std::set<std::string> &func, PtrNode *ptr);
  //generate name for unnamed variable, i.e load inst
- void generateName(LoadInst *load_inst);
+ void generateName(Instruction *inst);
  //find the relationship of two given blocks, ckeck if the first dominate the second
  //ought to generate dominator tree, but I am tired to this now and llvm has this function
  //but I ca not use in this homework, it is of no use bothering to do this
@@ -184,6 +184,8 @@ private:
  void dealWithAlloca(Instruction *curr);
  //deal with getElementPtr inst
  void dealWithGetElementPtr(Instruction *curr, std::set<AddrAlia *> *addr_alias);
+ //deal with bitcast, it is actually a addr alia, same as getElementPtr, I don't know why llvm do like this
+ void dealWithBitCast(Instruction *curr, std::vector<IPTS *> *ipts_vec, std::set<AddrAlia *> *addr_alias);
  //deal with store inst
  void dealWithStore(Instruction *curr, std::vector<IPTS *> *ipts_vec, std::set<AddrAlia *> *addr_alias);
  //deal with load inst
@@ -196,7 +198,7 @@ private:
 
 //function to compute PTS of a given function
 void PTSVisitor::computePTS(Function *F, PTSInfo *pts_info) {
-  if(F->isIntrinsic() ) 
+  if(F->isIntrinsic() || F->getName() == "malloc") 
     return;
   //add global information to gfuncs, gaddr, func_name_to_func;
   //outs() << F->getName() << "\n";
@@ -289,8 +291,8 @@ void PTSVisitor::computeResult(PTSInfo *gpts) {
       std::string ptr_name = call->getName();
       IPTS *ipts = getIPTS(temp.inst, gpts);
       if(ptr_name.empty() ) {             //an unnamed ptr, i.e like %1
-        if(load_variable_name.find(cast<LoadInst>(call) ) != load_variable_name.end() ) {
-          ptr_name = load_variable_name[cast<LoadInst>(call)]; 
+        if(unnamed_variable_name.find(cast<LoadInst>(call) ) != unnamed_variable_name.end() ) {
+          ptr_name = unnamed_variable_name[cast<LoadInst>(call)]; 
         }
         else {
           errs() << __LINE__ << ": Error001! Unrecongized unnamed call ptr\n";
@@ -304,7 +306,7 @@ void PTSVisitor::computeResult(PTSInfo *gpts) {
         }
       }
       if(called_ptr == NULL) {
-        errs() << "error! Can not find called function\n";
+        errs() << __LINE__ << "Error009!" << ptr_name << " Can not find called function\n";
         exit(-1);
       }
       std::set<std::string> func_name;
@@ -368,6 +370,9 @@ void PTSVisitor::computeIPTS(Instruction *curr, std::vector<IPTS *> *ipts_vec, s
   else if(IS("load") ) {
     dealWithLoad(curr, ipts_vec, addr_alias);
   }
+  else if(IS("bitcast") ) {
+    dealWithBitCast(curr, ipts_vec, addr_alias);
+  }
   else {                                //deal with instructions that will not change pts
     dealWithOthers(curr, ipts_vec);
   }
@@ -407,13 +412,13 @@ void PTSVisitor::getFuncFromPtr(std::set<std::string> &func, PtrNode *ptr) {
   //}
 }
 //generate name for unnamed variable
-void PTSVisitor::generateName(LoadInst *load_inst) {
+void PTSVisitor::generateName(Instruction *inst) {
   static int ID = 0;
   char id[10];
-  std::string name("load");
+  std::string name(inst->getOpcodeName() );
   sprintf(id, "%d", ID);
   name.append(id);
-  load_variable_name[load_inst] = name; 
+  unnamed_variable_name[inst] = name; 
   ID++;
 }
 
@@ -480,10 +485,10 @@ int PTSVisitor::getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gp
     std::string called_name = called_value->getName();
     if(called_name.empty() ) {                      //unnamed ptr, like %1 = load ..., it is a load value
       if(LoadInst *load_inst = dyn_cast<LoadInst>(called_value) ) {
-        called_name = load_variable_name[load_inst];        //get the generated name
+        called_name = unnamed_variable_name[load_inst];        //get the generated name
       }
       else {                                        //should not happen
-        errs() << "unrecongized unnamed variable error!\n";
+        errs() << __LINE__ << " Error011! Unrecongized unnamed variable error.\n";
       }
     }
     //get the called_value PtrNode
@@ -502,12 +507,14 @@ int PTSVisitor::getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gp
       called_func_set.insert(func_name_to_func[*iter1]);
     }
   }
-  //for(auto iter = called_func_set.begin(); iter != called_func_set.end(); ++iter) {
-  //  outs() << (*iter)->getName() << "\n";
-  //}
+  for(auto iter = called_func_set.begin(); iter != called_func_set.end(); ++iter) {
+    outs() << "called function:" << (*iter)->getName() << "\n";
+  }
   //get real arg from each function call instance
   for(auto func_iter = called_func_set.begin(); func_iter != called_func_set.end(); ++func_iter) {
     Function *func = *func_iter;
+    if(func->getName() == "malloc")       //no need to deal with malloc
+      continue;
     std::vector<PtrNode *> args;                                 //arg list
     std::vector<int> args_index;                                 //arg index
     //get the called func's FPTS
@@ -519,7 +526,7 @@ int PTSVisitor::getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gp
       }
     }
     if(fpts == NULL) {          //should not happen
-      errs() << "error! Can not find called Function!\n";
+      errs() << __LINE__ << " Error010! Can not find called Function!\n";
       exit(-1);
     }
     //get the args
@@ -647,7 +654,7 @@ void PTSVisitor::merge(IPTS *dest, IPTS *src) {
           }
         }
         if(!flag) {
-          errs() << __LINE__ << ": Error008! Can find object PtrNode in the IPTS when merge stage 2.\n";
+          errs() << __LINE__ << ": Error008!" << ptr_name << " Can find object PtrNode in the IPTS when merge stage 2.\n";
         }
       }
     }
@@ -667,6 +674,7 @@ void PTSVisitor::dealWithIntrinsicValue(Instruction *curr, std::vector<IPTS *> *
   if( (cast<DIType>(var_meta->getRawType() ) )->getTag() == dwarf::DW_TAG_pointer_type) {        
     PtrNode *temp_node = new PtrNode;
     temp_node->id = var_name; 
+    //outs() << __LINE__ << " create PtrNode : " << var_name << "\n";
     temp_node->pts = new std::set<PtrNode *>;                  //init as null pts
     //if it is a parameter, create a PtrNode and initialize it as "NULL"
     //when a call occurs, we use real_arg to initialize 
@@ -703,10 +711,21 @@ void PTSVisitor::dealWithIntrisicDeclare(Instruction *curr, std::vector<IPTS *> 
 }
 //deal with phi node
 void PTSVisitor::dealWithPhi(Instruction *curr, std::vector<IPTS *> *ipts_vec) {
+  //@TODO if it is not the object type PhiNode, we need not to deal with it
+  //object PhiNode: array, pointer, struct ... we can not decide now
+  //but we can decide which is not the object type and exclude it: find one, add one
   PHINode *phi = cast<PHINode>(curr);
+  if(phi->getIncomingValue(0)->getType()->isIntegerTy() ) {     //  need not to deal with int
+    IPTS *temp_ipts = new IPTS;      //create empty IPTS for curr inst
+    temp_ipts->first = curr;
+    temp_ipts->second = new std::set<PtrNode *>;
+    ipts_vec->push_back(temp_ipts);
+    return;
+  }
   std::string var_name = curr->getName();
   PtrNode *temp_node = new PtrNode;               
   temp_node->id = var_name;
+  outs() << __LINE__ << " create PtrNode: " << var_name << "\n";
   temp_node->type = PHI_TYPE;                 
   temp_node->pts = new std::set<PtrNode *>;
   for(int i = 0; i < phi->getNumIncomingValues(); ++i) {
@@ -733,6 +752,26 @@ void PTSVisitor::dealWithCall(Instruction *curr, std::vector<IPTS *> *ipts_vec) 
   temp_ipts->first = curr;
   temp_ipts->second = new std::set<PtrNode *>;
   ipts_vec->push_back(temp_ipts);
+  if(Function *func = dyn_cast<CallInst>(curr)->getCalledFunction() ) {
+    if(func->getName() == "malloc") {
+      BaseAddr *base = new BaseAddr;
+      Function *func = curr->getFunction();
+      std::string name = curr->getName();          //addr name
+      base->id = name;
+      //@TODO if malloc more than one element, we shou get the number
+      //it is not difficult, may be get the arg of the malloc and divide
+      //the size of one element will get the number. I just don't bother 
+      //to do it now. It is set as default value 1
+      base->len = 1;
+      std::vector<std::vector<StoreInst *> > elements;
+      base->elements = elements;
+      for(int i = 0; i < base->len; ++i) {
+        std::vector<StoreInst *> store_op;
+        base->elements.push_back(store_op);
+      }
+      gaddr[func][name] = base;
+    }
+  }
 }
 //deal with alloca inst
 void PTSVisitor::dealWithAlloca(Instruction *curr) {
@@ -740,8 +779,13 @@ void PTSVisitor::dealWithAlloca(Instruction *curr) {
   Function *func = curr->getFunction();
   std::string name = curr->getName();          //addr name
   AllocaInst *alloca = cast<AllocaInst>(curr);
-  unsigned len = alloca->getAllocatedType()->getArrayNumElements();
-  //cast<ConstantInt>(alloca->getArraySize() )->getZExtValue();
+  Type *alloca_type = alloca->getAllocatedType();
+  //@TODO array, struct, struct array
+  //len default as 1
+  unsigned len = 1;
+  if(alloca_type->isArrayTy() ) {
+    len = alloca->getAllocatedType()->getArrayNumElements();
+  }
   base->id = name;
   base->len = len;
   //outs() << "init len:" << len << "\n";
@@ -758,9 +802,10 @@ void PTSVisitor::dealWithGetElementPtr(Instruction *curr, std::set<AddrAlia *> *
   AddrAlia *alia = new AddrAlia;
   alia->name = curr->getName();
   GetElementPtrInst *get_ptr = cast<GetElementPtrInst>(curr);
-  std::string base = get_ptr->getPointerOperand()->getName();
-  alia->base = base;
+  std::string base_name = get_ptr->getPointerOperand()->getName();
+  alia->base = base_name;
   unsigned index_num = get_ptr->getNumIndices();
+  //@TODO multi-dimention index
   //the first operand is PointerOperand, and the first index is always 0
   for(int i = 2; i < index_num + 1; ++i) {
      alia->index = cast<ConstantInt>(get_ptr->getOperand(i) )->getZExtValue(); 
@@ -768,12 +813,34 @@ void PTSVisitor::dealWithGetElementPtr(Instruction *curr, std::set<AddrAlia *> *
   addr_alias->insert(alia);
 }
 
+ //deal with bitcast, it is actually a addr alia, same as getElementPtr, I don't know why llvm do like this
+void PTSVisitor::dealWithBitCast(Instruction *curr, std::vector<IPTS *> *ipts_vec, std::set<AddrAlia *> *addr_alias) {
+  AddrAlia *alia = new AddrAlia;
+  generateName(curr);
+  alia->name = unnamed_variable_name[curr];
+  std::string base_name;
+  if(BitCastInst *bit_cast = dyn_cast<BitCastInst>(curr) ) {
+    bit_cast->dump();
+    outs() << "operands : " << curr->getOperand(0)->getName() << "\n";
+    base_name = curr->getOperand(0)->getName();
+    alia->base = base_name;
+    //@TODO default as 0
+    alia->index = 0;
+  }
+  addr_alias->insert(alia);
+
+}
 //deal with store inst
 void PTSVisitor::dealWithStore(Instruction *curr, std::vector<IPTS *> *ipts_vec, std::set<AddrAlia *> *addr_alias) {
   StoreInst *store_inst = cast<StoreInst>(curr);
   outs() << "store inst:";
   store_inst->dump();
-  std::string alia_name = store_inst->getPointerOperand()->getName();
+  Value *pointer_operand = store_inst->getPointerOperand();
+  std::string alia_name = pointer_operand->getName();
+  if(alia_name.empty() ) {        //store at unnamed addr, i.e store @plus %0
+    alia_name = unnamed_variable_name[cast<Instruction>(pointer_operand)];
+  }
+  //std::string alia_name = store_inst->getPointerOperand()->getName();
   std::string base_name;
   BaseAddr *base = NULL;
   AddrAlia *alia = NULL;
@@ -827,8 +894,13 @@ void PTSVisitor::dealWithLoad(Instruction *curr, std::vector<IPTS *> *ipts_vec, 
   outs() << "load start\n";
   LoadInst *load_inst = cast<LoadInst>(curr);
   //generate a name for the unname load value
-  generateName(load_inst);
-  std::string alia_name = load_inst->getPointerOperand()->getName();
+  generateName(curr);
+  Value *pointer_operand = load_inst->getPointerOperand();
+  std::string alia_name = load_inst->getName();
+  if(alia_name.empty() ) {
+    alia_name = unnamed_variable_name[cast<Instruction>(pointer_operand)];
+  }
+  //std::string alia_name = load_inst->getPointerOperand()->getName();
   std::string base_name;
   BaseAddr *base = NULL;
   AddrAlia *alia = NULL;
@@ -855,7 +927,7 @@ void PTSVisitor::dealWithLoad(Instruction *curr, std::vector<IPTS *> *ipts_vec, 
   }
  PtrNode *load_value = new PtrNode;
  if(curr->getName().empty() ) {     //load value is unnamed
-   load_value->id = load_variable_name[load_inst];
+   load_value->id = unnamed_variable_name[load_inst];
  }
  else {
    load_value->id = curr->getName();    //load value is named
@@ -872,7 +944,7 @@ void PTSVisitor::dealWithLoad(Instruction *curr, std::vector<IPTS *> *ipts_vec, 
    if(ptr_name.empty() ) {    //that means we have store a unnamed variable, i.e a value from loaded
      store_inst->dump();
      if(LoadInst *temp_load = dyn_cast<LoadInst>(store_value) ) {
-       ptr_name = load_variable_name[temp_load];
+       ptr_name = unnamed_variable_name[temp_load];
        outs() << "ptr_name:" << ptr_name << "\n";
        
      }
@@ -900,7 +972,7 @@ void PTSVisitor::dealWithLoad(Instruction *curr, std::vector<IPTS *> *ipts_vec, 
  temp_ipts->second = new std::set<PtrNode *>;
  temp_ipts->second->insert(load_value);
  ipts_vec->push_back(temp_ipts);
- load_value->dump();
+ //load_value->dump();
  outs() << "load end\n";
 }
 
