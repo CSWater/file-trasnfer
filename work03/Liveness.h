@@ -82,7 +82,10 @@ struct AddrAlia {
 };
 
 void dump(IPTS *ipts) {
-  ipts->first->dump();
+  if(ipts->first != NULL)
+    ipts->first->dump();
+  else 
+    outs() << "NULL inst\n";
   std::set<PtrNode *> *pts = ipts->second;
   //iterate over ptr variable
   for(auto iter1 = pts->begin(); iter1 != pts->end(); ++iter1) {
@@ -167,6 +170,8 @@ public :
  bool findWayToEntry(BasicBlock *entry, BasicBlock *me, BasicBlock *father);
  
 private:
+ //
+ void createArgIpts(Function *F, IPTS *arg_ipts);
  //get real arg from called, if changed gpts, return 1
  int getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gpts);
  //transfer the arg PtrNode to the called func
@@ -224,6 +229,28 @@ void PTSVisitor::computePTS(Function *F, PTSInfo *pts_info) {
   fpts->first = F;
   fpts->second = bpts_vec;
   pts_info->gpts.push_back(fpts);
+  //
+  BPTS *entry_bpts = bpts_vec->front();
+  IPTS *arg_ipts = new IPTS;
+  createArgIpts(F, arg_ipts);
+  entry_bpts->second->insert(entry_bpts->second->begin(), arg_ipts);
+}
+
+//create a PtrNode and initialize it as "NULL" for each pointer
+//parameter, when a call occurs, we use real_arg to initialize 
+void PTSVisitor::createArgIpts(Function *F, IPTS *arg_ipts) {
+  arg_ipts->first = NULL;
+  arg_ipts->second = new std::set<PtrNode *>;
+  for(auto iter = F->arg_begin(); iter != F->arg_end(); iter++) {
+    if(iter->getType()->isPointerTy() ) {
+      PtrNode *arg = new PtrNode;
+      arg->id = iter->getName();
+      arg->type = ARG_TYPE | iter->getArgNo();
+      arg->pts = new std::set<PtrNode *>;
+      outs() << "arg index:" << iter->getArgNo() << "\n";
+      arg_ipts->second->insert(arg);
+    }
+  }
 }
 
 //funtion to calculate global PTS, assume that each funtion's PTS 
@@ -536,14 +563,14 @@ int PTSVisitor::getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gp
       //only need to deal with function pointer parameters
       if(arg->getType()->isPointerTy() ) {
         std::string arg_name = arg->getName();
-        //outs() << "arg name:" << arg_name << "\n";
+        if(arg_name.empty() )    {         //param is unnamed value, like %1
+          arg_name = unnamed_variable_name[cast<Instruction>(arg)];
+        }
         if(gfuncs.find(arg_name) != gfuncs.end() ) {         //func addr as param
-          outs() << "func addr as param\n";
           args.push_back(gfuncs.find(arg_name)->second);
           args_index.push_back(i);
         }
         else {                                               //func ptr as param
-          outs() << "func ptr as param\n";
           for(auto it = ipts->second->begin(); it != ipts->second->end(); ++it) {
             if(arg_name.compare((*it)->id) == 0) {
               //outs() << (*it)->id << "\n";
@@ -566,45 +593,40 @@ int PTSVisitor::getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gp
   }
   return 0;
 }
+
 //transfer the arg PtrNode to the called func
 void PTSVisitor::transferParamToFunc(std::vector<PtrNode *> &args, std::vector<int> args_index, FPTS *fpts) {
+  outs() << "transfer start\n";
   //the arg must in the entry block
   BPTS *entry_bpts = fpts->second->front();
   //transfer the args list to the param list
   auto iter1 = args.begin();
   auto iter2 = args_index.begin();
   for( ;iter1 != args.end(); ++iter1, ++iter2) {
-    //outs() << "here1\n";
     bool completed = false;
     PtrNode *arg = *iter1;
     int index = *iter2;
-    for(auto iteri = entry_bpts->second->begin(); iteri != entry_bpts->second->end(); ++iteri) {
-      //outs() << "here2\n";
-      IPTS *ipts = *iteri;
-      for(auto iter = ipts->second->begin(); iter != ipts->second->end(); ++iter) {
-        //outs() << "here3\n";
-        PtrNode *param = *iter;
-        if((param->type & 0x80 ) &&(param->type & 0xf) == (index + 1) ) {  //index start at 0, but argNO start at 1
-          //outs() << "here4\n";
-          //delete the old call inst arg
-          param->pts_name.clear();
-          param->pts->clear();
-          //outs() << "here5\n";
-          //pass the new arg
-          param->pts_name.insert(arg->id);
-          param->pts->insert(arg);
-          outs() << arg->id << " transfer complete!\n";
-          completed = true;
-          break;
-        }
-      }
-      if(completed){
-        //outs() << "here6\n";
+    IPTS *ipts = entry_bpts->second->front();
+    for(auto iter = ipts->second->begin(); iter != ipts->second->end(); ++iter) {
+      PtrNode *param = *iter;
+      if((param->type & 0x80 ) &&(param->type & 0xf) == index ) {
+        //delete the old call inst arg
+        param->pts_name.clear();
+        param->pts->clear();
+        //pass the new arg
+        param->pts_name.insert(arg->id);
+        param->pts->insert(arg);
+        outs() << param->id << " get " <<  arg->id << " transfer complete!\n";
+        dump(ipts);
+        completed = true;
         break;
       }
     }
+    if(!completed) {   //should not happen
+      errs() << __LINE__  << ": Error013. Param Transfer error, errro param index: " << index << "\n";
+    }
   }
-  //outs() << "transfer over!\n";
+  outs() << "transfer over!\n";
 }
 //merge the IPTS of two successive inst
 //two stages
@@ -655,27 +677,27 @@ void PTSVisitor::merge(IPTS *dest, IPTS *src) {
     }
   }
 }
+
 //deal with llvm.dbg.value
+//get the declare pointer and init this inst pts, then add to this block pts
 void PTSVisitor::dealWithIntrinsicValue(Instruction *curr, std::vector<IPTS *> *ipts_vec) {
+  IPTS *temp_ipts = new IPTS;      //create IPTS for curr inst
+  temp_ipts->first = curr;
+  temp_ipts->second = new std::set<PtrNode *>;
+  ipts_vec->push_back(temp_ipts);
   CallInst *call_intrinsic = cast<CallInst>(curr);
-  //get the declare pointer and init this inst pts, then add to this block pts
   //The first argument is the new value (wrapped as metadata)
-  Metadata *temp = cast<Metadata>(cast<MetadataAsValue>(call_intrinsic->getOperand(0) )->getMetadata() );
-  Value *var_value = cast<ValueAsMetadata>(temp)->getValue();
-  std::string var_value_name = var_value->getName();
   DILocalVariable *var_meta = cast<DILocalVariable>((cast<MetadataAsValue>(call_intrinsic->getOperand(2) ) )->getMetadata() );
   std::string var_name = var_meta->getName();
   //pointer type
   if( (cast<DIType>(var_meta->getRawType() ) )->getTag() == dwarf::DW_TAG_pointer_type) {        
-    PtrNode *temp_node = new PtrNode;
-    temp_node->id = var_name; 
-    temp_node->pts = new std::set<PtrNode *>;                  //init as null pts
-    //if it is a parameter, create a PtrNode and initialize it as "NULL"
-    //when a call occurs, we use real_arg to initialize 
-    if(var_meta->getArg() ) {
-      temp_node->type = ARG_TYPE | (var_meta->getArg() );  
-    }
-    else {          //it is a local variable
+    if(var_meta->getArg() == 0) {       //it is a local variable, we have dealed with params at createArgIpts
+      PtrNode *temp_node = new PtrNode;
+      temp_node->id = var_name; 
+      temp_node->pts = new std::set<PtrNode *>;                  //init as null pts
+      Metadata *temp = cast<Metadata>(cast<MetadataAsValue>(call_intrinsic->getOperand(0) )->getMetadata() );
+      Value *var_value = cast<ValueAsMetadata>(temp)->getValue();
+      std::string var_value_name = var_value->getName();
       temp_node->type = POINTER_TYPE;
       if(!var_value_name.empty() ) {                           //point to NON_NULL value
         //if it is a function addr, just initialize the temp_node
@@ -690,12 +712,8 @@ void PTSVisitor::dealWithIntrinsicValue(Instruction *curr, std::vector<IPTS *> *
           temp_node->pts_name.insert(var_value_name);
         }
       }
+      temp_ipts->second->insert(temp_node);
     }
-    IPTS *temp_ipts = new IPTS;      //create IPTS for curr inst
-    temp_ipts->first = curr;
-    temp_ipts->second = new std::set<PtrNode *>;
-    temp_ipts->second->insert(temp_node);
-    ipts_vec->push_back(temp_ipts);
   }
 }
 
@@ -774,10 +792,6 @@ void PTSVisitor::dealWithCall(Instruction *curr, std::vector<IPTS *> *ipts_vec) 
       BaseAddr *base = new BaseAddr;
       //@TODO defalut as 0, more complicate cases need to be dealed with
       //i.e malloc a struct or something else
-      outs() << curr->getNumOperands() << "\n";
-      curr->dump();
-      curr->getOperand(0)->dump();
-      curr->getOperand(1)->dump();
       base->type = 0;
       Function *func = curr->getFunction();
       std::string name = curr->getName();          //addr name
@@ -856,24 +870,35 @@ void PTSVisitor::dealWithBitCast(Instruction *curr, std::vector<IPTS *> *ipts_ve
   BitCastInst *bit_cast = cast<BitCastInst>(curr);
   Type *src_type = bit_cast->getSrcTy();
   Type *dest_type = bit_cast->getDestTy();
-  bool flag = false;
+  bool flag1 = false, flag2 = false;
   if(src_type->isPointerTy() ) {
-    if(cast<PointerType>(src_type)->getElementType()->isStructTy() ) 
-      flag = true;
+    if(src_type->getPointerElementType()->isStructTy() ) 
+      flag1 = true;
   }
   if(dest_type->isPointerTy() ) {
-    if(cast<PointerType>(dest_type)->getElementType()->isStructTy() ) 
-      flag = true;
+    if(dest_type->getPointerElementType()->isStructTy() ) 
+      flag2 = true;
   }
-  if(flag) {
+  if(flag1 || flag2) {
     std::string base_name = curr->getOperand(0)->getName(); 
     if(base_name.empty() ) {            //cast a unnamed variable
       Value *temp = curr->getOperand(0);
       base_name = unnamed_variable_name[cast<Instruction>(temp)];
     }
     unnamed_variable_name[curr] = base_name;
-    gaddr[curr->getFunction()][base_name]->type = 1;
-    //outs() << "base name : " << base_name << "\n";
+    //check if it is a struct that has a pointer of struct as element, that means its type should be 1
+    if(flag1) {
+      Type *type = src_type->getPointerElementType()->getStructElementType(0);
+      if(type->getPointerElementType()->isStructTy() ) {
+        gaddr[curr->getFunction()][base_name]->type = 1;
+      }
+    }
+    if(flag2) {
+      Type *type = dest_type->getPointerElementType()->getStructElementType(0);
+      if(type->getPointerElementType()->isStructTy() ) {
+        gaddr[curr->getFunction()][base_name]->type = 1;
+      }
+    }
   }
   else {
     AddrAlia *alia = new AddrAlia;
@@ -930,6 +955,7 @@ void PTSVisitor::dealWithStore(Instruction *curr, std::vector<IPTS *> *ipts_vec,
       base->elements[alia->index].push_back(store_inst);
     }
     else {
+      outs() << "multivalue\n";
       base->elements[alia->index].push_back(store_inst);
     }
   }
@@ -948,7 +974,6 @@ void PTSVisitor::dealWithLoad(Instruction *curr, std::vector<IPTS *> *ipts_vec, 
   if(alia_name.empty() ) {
     alia_name = unnamed_variable_name[cast<Instruction>(pointer_operand)];
   }
-  std::string base_name;
   BaseAddr *base = NULL;
   AddrAlia *alia = NULL;
   //get alia, it must have been occur in a store inst or it is an error
@@ -958,11 +983,8 @@ void PTSVisitor::dealWithLoad(Instruction *curr, std::vector<IPTS *> *ipts_vec, 
       break;
     }
   }
-  if(alia != NULL) {
-    //get base
-    base_name = alia->base;
-    Function *func = curr->getFunction();
-    base = gaddr[func][base_name];
+  if(alia != NULL) {      //get base
+    base = gaddr[curr->getFunction()][alia->base];
   }
   else {            //should not occur
     errs() << __LINE__ << ": Error002! Unrecongnized addr alia error when load.\n";
@@ -1016,8 +1038,10 @@ void PTSVisitor::dealWithLoad(Instruction *curr, std::vector<IPTS *> *ipts_vec, 
       }
     }
     temp_ipts->second->insert(load_value);
+    load_value->dump();
   }
   else if (base->type == 1) {       //nothing to say, it is not beautiful now
+      outs() << "here\n";
       StoreInst *store_inst = base->elements[alia->index].back();
       Value *store_value = store_inst->getValueOperand();
       unnamed_variable_name[curr] = store_value->getName();
