@@ -59,9 +59,11 @@ typedef std::pair<Function *, std::vector<BPTS *> *> FPTS;
 struct BaseAddr {
   std::string id;                                 //id to represnt a addr
   unsigned len;                                     //the number of elements
-  unsigned type;                                  //0 indicates value, 1 indicates addr
+  unsigned type;                                  //0 indicates the addr of value, 1 indicates the addr of addr
+  bool is_param;                                  //true incates it is a param
+  BaseAddr *real_base;                             //when is_param = true, represent its real base addr 
   std::vector<std::vector<StoreInst *> > elements;   //use store op to record the newest value of the addr
-  BaseAddr() : id(), len(-1), type(-1), elements() {}
+  BaseAddr() : id(), len(-1), type(-1), is_param(false), real_base(NULL), elements() {}
   void dump() {
     outs() << "id: " << id << "\n";
     outs() << "len: " << len << "\n";
@@ -170,10 +172,14 @@ public :
  bool findWayToEntry(BasicBlock *entry, BasicBlock *me, BasicBlock *father);
  
 private:
+ //if param is base addr, add it to gaddr
+ void initBaseAddr(Function *F);
  //
  void createArgIpts(Function *F, IPTS *arg_ipts);
  //get real arg from called, if changed gpts, return 1
  int getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gpts);
+ //get called function from a call_inst, may not be only one function
+ void getFunctionFromCallInst(CallInst *call_inst, IPTS *ipts, std::set<Function *> &called_func_set);
  //transfer the arg PtrNode to the called func
  void transferParamToFunc(std::vector<PtrNode *> &args, std::vector<int> index, FPTS *fpts);
  //merge
@@ -221,7 +227,7 @@ void PTSVisitor::computePTS(Function *F, PTSInfo *pts_info) {
   FPTS *fpts = new FPTS;
   std::set<AddrAlia *> *addr_alias = new std::set<AddrAlia *>;
   std::vector<BPTS *> *bpts_vec = new std::vector<BPTS *>;
-
+  initBaseAddr(F);
   for(auto block_i = F->begin(); block_i != F->end(); ++block_i) {
     BasicBlock *block = cast<BasicBlock>(block_i);
     computeBPTS(block, bpts_vec, addr_alias);
@@ -236,9 +242,29 @@ void PTSVisitor::computePTS(Function *F, PTSInfo *pts_info) {
   entry_bpts->second->insert(entry_bpts->second->begin(), arg_ipts);
 }
 
+
+//if param is base addr, add it to gaddr
+void PTSVisitor::initBaseAddr(Function *F) {
+  for(auto iter = F->arg_begin(); iter != F->arg_end(); iter++) {
+    if(iter->getType()->isPointerTy() ) {                         
+      if(iter->getType()->getPointerElementType()->isPointerTy() ) {
+        //param is addr, add it to gaddr
+        BaseAddr *base = new BaseAddr;
+        base->id = iter->getName();
+        base->is_param = true;
+        gaddr[F][iter->getName()] = base;
+        //outs() << "type: ";
+        //iter->getType()->dump();
+        //outs() << "point to: ";
+        //iter->getType()->getPointerElementType()->dump();
+      }
+    }
+  }
+}
 //create a PtrNode and initialize it as "NULL" for each pointer
 //parameter, when a call occurs, we use real_arg to initialize 
 void PTSVisitor::createArgIpts(Function *F, IPTS *arg_ipts) {
+  //if param is a pointer, create PtrNode for it
   arg_ipts->first = NULL;
   arg_ipts->second = new std::set<PtrNode *>;
   for(auto iter = F->arg_begin(); iter != F->arg_end(); iter++) {
@@ -247,7 +273,7 @@ void PTSVisitor::createArgIpts(Function *F, IPTS *arg_ipts) {
       arg->id = iter->getName();
       arg->type = ARG_TYPE | iter->getArgNo();
       arg->pts = new std::set<PtrNode *>;
-      outs() << "arg index:" << iter->getArgNo() << "\n";
+      //outs() << "arg index:" << iter->getArgNo() << "\n";
       arg_ipts->second->insert(arg);
     }
   }
@@ -429,9 +455,9 @@ void PTSVisitor::getFuncFromPtr(std::set<std::string> &func, PtrNode *ptr) {
     return;
   }
   if(ptr->pts->empty() ) {
-    errs() << "Error000! Empty PtrNode error\n";
+    errs() << __LINE__ << ": Error000! Empty PtrNode error: ";
     errs() << ptr->id << " : pts is empty\n";
-    exit(-1);
+    //exit(-1);
   }
   for(auto iter = ptr->pts->begin(); iter != ptr->pts->end(); ++iter) {
     getFuncFromPtr(func, *iter);
@@ -500,44 +526,50 @@ IPTS* PTSVisitor::getIPTS(Instruction *inst, PTSInfo *gpts) {
   }
   return ipts;
 }
+
+//get called function from a call_inst, may not be only one function
+void PTSVisitor::getFunctionFromCallInst(CallInst *call_inst, IPTS *ipts, std::set<Function *> &called_func_set) {
+  if(Function *func = call_inst->getCalledFunction() ) {
+     called_func_set.insert(func);                           //direct function call
+   }
+   else {                                                       //indirect function call
+     Value *called_value = call_inst->getCalledValue();
+     std::string called_name = called_value->getName();
+     if(called_name.empty() ) {                      //unnamed ptr, like %1 = load ..., it is a load value
+       if(LoadInst *load_inst = dyn_cast<LoadInst>(called_value) ) {
+         called_name = unnamed_variable_name[load_inst];        //get the generated name
+       }
+       else {                                        //should not happen
+         errs() << __LINE__ << " Error011! Unrecongized unnamed variable error.\n";
+       }
+     }
+     //get the called_value PtrNode
+     PtrNode *called_ptr = NULL;
+     for(auto iter = ipts->second->begin(); iter != ipts->second->end(); ++iter) {
+       if((*iter)->id.compare(called_name) == 0) {
+         called_ptr = *iter;
+         break;
+       }
+     }
+     if(called_ptr == NULL) {
+       errs() << __LINE__ << ": Error009!" << called_name << " Can not find called function\n";
+       exit(-1);
+     }
+     std::set<std::string> func_name;
+     //get the called function and do param tranfer for each may-called-func
+     getFuncFromPtr(func_name, called_ptr);
+     for(auto iter1 = func_name.begin(); iter1 != func_name.end(); ++iter1) {
+       called_func_set.insert(func_name_to_func[*iter1]);
+     }
+   }
+}
+
 //get real arg from called, if changed gpts, return 1
 int PTSVisitor::getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gpts) {
   //get called Function
   std::set<Function *> called_func_set;
-  if(Function *func = call_inst->getCalledFunction() ) {
-    called_func_set.insert(func);                           //direct function call
-  }
-  else {                                                       //indirect function call
-    Value *called_value = call_inst->getCalledValue();
-    std::string called_name = called_value->getName();
-    if(called_name.empty() ) {                      //unnamed ptr, like %1 = load ..., it is a load value
-      if(LoadInst *load_inst = dyn_cast<LoadInst>(called_value) ) {
-        called_name = unnamed_variable_name[load_inst];        //get the generated name
-      }
-      else {                                        //should not happen
-        errs() << __LINE__ << " Error011! Unrecongized unnamed variable error.\n";
-      }
-    }
-    //get the called_value PtrNode
-    PtrNode *called_ptr = NULL;
-    for(auto iter = ipts->second->begin(); iter != ipts->second->end(); ++iter) {
-      if((*iter)->id.compare(called_name) == 0) {
-        called_ptr = *iter;
-        break;
-      }
-    }
-    if(called_ptr == NULL) {
-      errs() << __LINE__ << ": Error009!" << called_name << " Can not find called function\n";
-      exit(-1);
-    }
-    std::set<std::string> func_name;
-    //get the called function and do param tranfer for each may-called-func
-    getFuncFromPtr(func_name, called_ptr);
-    for(auto iter1 = func_name.begin(); iter1 != func_name.end(); ++iter1) {
-      called_func_set.insert(func_name_to_func[*iter1]);
-    }
-  }
-  //get real arg from each function call instance
+  getFunctionFromCallInst(call_inst, ipts, called_func_set);
+ //get real arg from each function call instance
   for(auto func_iter = called_func_set.begin(); func_iter != called_func_set.end(); ++func_iter) {
     Function *func = *func_iter;
     if(func->getName() == "malloc")       //no need to deal with malloc
@@ -562,6 +594,7 @@ int PTSVisitor::getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gp
       Value *arg = call_inst->getArgOperand(i);
       //only need to deal with function pointer parameters
       if(arg->getType()->isPointerTy() ) {
+       // arg->getType()->dump();
         std::string arg_name = arg->getName();
         if(arg_name.empty() )    {         //param is unnamed value, like %1
           arg_name = unnamed_variable_name[cast<Instruction>(arg)];
@@ -583,8 +616,8 @@ int PTSVisitor::getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gp
       }
     }
     if(args.size() != 0) {
-      if(args.size() != args_index.size() ) {
-        errs() << "param transfer error!\n";
+      if(args.size() != args_index.size() ) {     //should not happen
+        errs() << __LINE__ << ": Error014! Param transfer error!\n";
         exit(-1); 
       }
       transferParamToFunc(args, args_index, fpts);
@@ -617,7 +650,6 @@ void PTSVisitor::transferParamToFunc(std::vector<PtrNode *> &args, std::vector<i
         param->pts_name.insert(arg->id);
         param->pts->insert(arg);
         outs() << param->id << " get " <<  arg->id << " transfer complete!\n";
-        dump(ipts);
         completed = true;
         break;
       }
@@ -948,7 +980,6 @@ void PTSVisitor::dealWithStore(Instruction *curr, std::vector<IPTS *> *ipts_vec,
   //else just cover the before store inst
   else {
     BasicBlock *b1 = store_inst->getParent();
-    //(base->elements[alia->index].back())->dump();
     BasicBlock *b2 = base->elements[alia->index].back()->getParent();
     if(b1 == b2 || b1->getSinglePredecessor() == b2) {
       base->elements[alia->index].clear();
@@ -1038,13 +1069,15 @@ void PTSVisitor::dealWithLoad(Instruction *curr, std::vector<IPTS *> *ipts_vec, 
       }
     }
     temp_ipts->second->insert(load_value);
-    load_value->dump();
   }
-  else if (base->type == 1) {       //nothing to say, it is not beautiful now
+  else if(base->type == 1) {       //nothing to say, it is not beautiful now
       outs() << "here\n";
       StoreInst *store_inst = base->elements[alia->index].back();
       Value *store_value = store_inst->getValueOperand();
       unnamed_variable_name[curr] = store_value->getName();
+  }
+  else if(base->type == -1) {
+    outs() << "uninitialized base addr\n";
   }
 }
 
