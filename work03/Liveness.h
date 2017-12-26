@@ -13,6 +13,7 @@
 
 #include "Dataflow.h"
 #include <vector>
+#include <stack>
 #include <set>
 #include <utility>
 #include <string>
@@ -91,6 +92,9 @@ void dump(IPTS *ipts) {
   else 
     outs() << "NULL inst\n";
   std::set<PtrNode *> *pts = ipts->second;
+  if(pts->empty() ) {
+    outs() << "empty IPTS!\n";
+  }
   //iterate over ptr variable
   for(auto iter1 = pts->begin(); iter1 != pts->end(); ++iter1) {
     PtrNode *ptr = *iter1;
@@ -146,13 +150,14 @@ private:
  //load type variable alia name, for load variable may be unnamed temprary
  std::map<Instruction *, std::string> unnamed_variable_name;
  //store the return value of a function
- std::map<Function *, PtrNode *> ret_value;
+ std::map<Function *, PtrNode *> global_ret_value;
  //store all the call inst to help inter procedure PTS analysis
  std::vector<Instruction *> call_inst_vec;
  //store result
  std::vector<LineFunc> result;
 public :
  PTSVisitor() {}
+ void printCallInstVec();
  //function to compute PTS of a given function
  void computePTS(Function *F, PTSInfo *pts_info) override;
 //funtion to calculate global PTS, assume that each funtion's PTS 
@@ -188,13 +193,13 @@ private:
  //chech if a value is addr
  bool isValueAddr(Value *value);
  //get real arg from called, invokes getArgFromCallInst;
- int getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gpts_info);
+ void getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gpts_info);
  //get args from a call inst, referrenced by getParamsFromCalled;
  bool getArgFromCallInst(CallInst *call_inst, IPTS *ipts, std::vector<PtrNode *> &args, std::vector<int> &args_index);
  //get called function from a call_inst, may not be only one function
  void getFunctionFromCallInst(CallInst *call_inst, IPTS *ipts, std::set<Function *> &called_func_set);
  //deal with s_fptr = foo(xx,xx, af_ptr, bf_ptr)
- void getReturnFunc(Function *F, PtrNode *out, PTSInfo *gpts_info);
+ void getReturnFunc(Function *F, PTSInfo *gpts_info);
  //transfer the arg PtrNode to the called func
  void transferParamToFunc(std::vector<PtrNode *> &args, std::vector<int> index, FPTS *fpts);
  //merge
@@ -233,6 +238,7 @@ void PTSVisitor::computePTS(Function *F, PTSInfo *pts_info) {
   PtrNode *func_ptr = new PtrNode;
   func_ptr->id = F->getName();
   func_ptr->type = VALUE_TYPE;
+  //outs() << "create PtrNode " << func_ptr->id << " at " << __LINE__ << "\n";
   gfuncs[F->getName()] = func_ptr;
   func_name_to_func[F->getName()] = F;
   //create FPTS andaddr alias  for the function
@@ -265,6 +271,8 @@ bool PTSVisitor::visitParamMemory(Function *F) {
 
 //get call inst
 void PTSVisitor::getCallInst(Function *F) {
+  static int index = 1;
+  std::stack<Instruction *> temp;
   for(auto block_i = F->begin(); block_i != F->end(); ++block_i) {
     BasicBlock *block = cast<BasicBlock>(block_i);
     for(auto inst_i = block->begin(); inst_i != block->end(); ++inst_i) {
@@ -273,14 +281,25 @@ void PTSVisitor::getCallInst(Function *F) {
         if(call->getCalledFunction() && call->getCalledFunction()->isIntrinsic() ) 
           continue;
         //push back call inst for interProcedure PTS analysis
-        outs() << "call : ";
-        inst->dump();
-        call_inst_vec.push_back(inst);
-        LineFunc temp;
-        temp.inst = inst;
-        result.push_back(temp);
+        temp.push(inst);
       }
     }
+  }
+  while(!temp.empty() ) {
+    Instruction* inst = temp.top();
+    temp.pop();
+    call_inst_vec.push_back(inst);
+    LineFunc temp;
+    temp.inst = inst;
+    result.push_back(temp);
+  }
+}
+
+void PTSVisitor::printCallInstVec() {
+  int i = 1;
+  for(auto iter = call_inst_vec.begin(); iter != call_inst_vec.end(); iter++, i++) {
+    outs() << i << " : ";
+    (*iter)->dump();
   }
 }
 
@@ -291,13 +310,16 @@ void PTSVisitor::createArgIpts(Function *F, IPTS *arg_ipts) {
   arg_ipts->first = NULL;
   arg_ipts->second = new std::set<PtrNode *>;
   for(auto iter = F->arg_begin(); iter != F->arg_end(); iter++) {
+    //int * is a pointer, int ** is a address
     if(iter->getType()->isPointerTy() ) {
-      PtrNode *arg = new PtrNode;
-      arg->id = iter->getName();
-      arg->type = ARG_TYPE | iter->getArgNo();
-      arg->pts = new std::set<PtrNode *>;
-      //outs() << "arg index:" << iter->getArgNo() << "\n";
-      arg_ipts->second->insert(arg);
+      if(!iter->getType()->getPointerElementType()->isPointerTy() ) {
+        PtrNode *arg = new PtrNode;
+        arg->id = iter->getName();
+        arg->type = ARG_TYPE | iter->getArgNo();
+        arg->pts = new std::set<PtrNode *>;
+        //outs() << "create PtrNode " << arg->id << " at " << __LINE__ << "\n";
+        arg_ipts->second->insert(arg);
+      }
     }
   }
 }
@@ -351,7 +373,9 @@ void PTSVisitor::interProcedurePTSTransfer(PTSInfo *gpts_info) {
   for(auto iter = call_inst_vec.rbegin(); iter != call_inst_vec.rend(); ++iter) {
     IPTS *curr_ipts = getIPTS(*iter, gpts_info);
     CallInst *call_inst = cast<CallInst>(*iter);
+    outs() << "*************************getParamsFromCalled called start\n";
     getParamsFromCalled(call_inst, curr_ipts, gpts_info);
+    outs() << "*************************getParamsFromCalled called end\n";
   }
   computeGPTS(gpts_info);
   computeResult(gpts_info);
@@ -386,12 +410,14 @@ void PTSVisitor::computeResult(PTSInfo *gpts_info) {
       }
       if(called_ptr == NULL) {
         errs() << __LINE__ << ": Error009!" << ptr_name << " Can not find called function\n";
-        exit(-1);
+        //exit(-1);
       }
-      std::set<std::string> func_name;
-      getFuncFromPtr(func_name, called_ptr);
-      for(auto iter3 = func_name.begin(); iter3 != func_name.end(); ++iter3) {
-        temp.name.insert(*iter3);
+      else {
+        std::set<std::string> func_name;
+        getFuncFromPtr(func_name, called_ptr);
+        for(auto iter3 = func_name.begin(); iter3 != func_name.end(); ++iter3) {
+          temp.name.insert(*iter3);
+        }
       }
     }
   }
@@ -570,30 +596,34 @@ void PTSVisitor::getFunctionFromCallInst(CallInst *call_inst, IPTS *ipts, std::s
      }
      if(called_ptr == NULL) {
        errs() << __LINE__ << ": Error009!" << called_name << " Can not find called function\n";
+       outs() << "error call: ";
+       call_inst->dump();
        exit(-1);
      }
      std::set<std::string> func_name;
      //get the called function and do param tranfer for each may-called-func
      getFuncFromPtr(func_name, called_ptr);
      for(auto iter1 = func_name.begin(); iter1 != func_name.end(); ++iter1) {
+       outs() << "**************************" << *iter1 << "\n";
        called_func_set.insert(func_name_to_func[*iter1]);
      }
    }
 }
 
 //deal with s_fptr = foo(xx,xx, af_ptr, bf_ptr)
-void PTSVisitor::getReturnFunc(Function *F, PtrNode *out, PTSInfo *gpts_info) {
+void PTSVisitor::getReturnFunc(Function *F, PTSInfo *gpts_info) {
+  outs() << "called getReturnFunc *********************************\n";
   for(auto block_i = F->begin(); block_i != F->end(); ++block_i) {
     BasicBlock *block = cast<BasicBlock>(block_i);
     for(auto inst_i = block->begin(); inst_i != block->end(); ++inst_i) {
       Instruction *inst = cast<Instruction>(inst_i);
       if(ReturnInst *ret = dyn_cast<ReturnInst>(inst) ) {
-        Value *ret_value = ret->getReturnValue();
-        std::string ret_value_name = ret_value->getName();
+        std::string ret_value_name = ret->getReturnValue()->getName();
         IPTS *ipts = getIPTS(inst, gpts_info);
         for(auto iter = ipts->second->begin(); iter != ipts->second->end(); ++iter) {
           if((*iter)->id.compare(ret_value_name) == 0) {
-            out = *iter;
+            outs() << "ret : " << ret_value_name << "\n"; 
+            global_ret_value[F] = *iter;
             return;
           }
         }
@@ -605,6 +635,7 @@ void PTSVisitor::getReturnFunc(Function *F, PtrNode *out, PTSInfo *gpts_info) {
 //get args from a call inst
 bool PTSVisitor::getArgFromCallInst(CallInst *call_inst, IPTS *ipts, std::vector<PtrNode *> &args, std::vector<int> &args_index) {
   unsigned num = call_inst->getNumArgOperands();
+  dump(ipts);
   for(int i = 0; i < num; ++i) {
     Value *arg = call_inst->getArgOperand(i);
     //only need to deal with function pointer parameters
@@ -618,6 +649,7 @@ bool PTSVisitor::getArgFromCallInst(CallInst *call_inst, IPTS *ipts, std::vector
         args_index.push_back(i);
       }
       else {                                               //func ptr as param
+        outs() << "arg name :" << arg_name << "\n";
         for(auto it = ipts->second->begin(); it != ipts->second->end(); ++it) {
           if(arg_name.compare((*it)->id) == 0) {
             args.push_back(*it);
@@ -629,6 +661,7 @@ bool PTSVisitor::getArgFromCallInst(CallInst *call_inst, IPTS *ipts, std::vector
     }
   }
   if(args.size() == 0) {
+    outs() << "here , wrong 0\n";
     return false;
   }
   if(args.size() != args_index.size() ) {     //should not happen
@@ -648,7 +681,7 @@ bool PTSVisitor::isValueAddr(Value *value) {
 }
 
 //get real arg from called, invokes getArgFromCallInst;
-int PTSVisitor::getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gpts_info) {
+void PTSVisitor::getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gpts_info) {
   //get called Functions
   std::set<Function *> called_func_set;
   getFunctionFromCallInst(call_inst, ipts, called_func_set);
@@ -656,7 +689,9 @@ int PTSVisitor::getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gp
   std::vector<PtrNode *> args;                                 //arg list
   std::vector<int> args_index;                                 //arg index
   bool flag = getArgFromCallInst(call_inst, ipts, args, args_index);
- //get real arg from each function call instance
+  if(!flag)       //no need to do param transfer
+    return;
+  //get real arg from each function call instance
   for(auto func_iter = called_func_set.begin(); func_iter != called_func_set.end(); ++func_iter) {
     Function *F = *func_iter;
     if(F->getName() == "malloc")       //no need to deal with malloc
@@ -674,12 +709,13 @@ int PTSVisitor::getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gp
       }
       for(auto iter = F->arg_begin(); iter != F->arg_end(); ++iter) {
         if(isValueAddr(cast<Value>(iter) ) ) {
-          outs() << "addr param\n";
           param_addr[cast<Argument>(iter)] = new ParamAddr;
           param_addr[cast<Argument>(iter)]->alia = arg_alia;
         }
       }
       computePTS(F, gpts_info);
+      computeGPTS(gpts_info);    //spent more than three hours to find I need this line, and I write it now
+      outs() << F->getName() << "'s FPTS computed!\n";
     }
     //get the called func's FPTS
     FPTS *fpts = NULL;
@@ -691,22 +727,32 @@ int PTSVisitor::getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gp
     if(flag) {
       transferParamToFunc(args, args_index, fpts);
       //deal with Return Value
-      //@TODO
+      bool exist = false;
       if(F->getReturnType()->isPointerTy() ) {
-        PtrNode *ret = NULL;
-        getReturnFunc(F, ret, gpts_info);
-        PtrNode *temp = new PtrNode;
-        temp->id = call_inst->getName();
-        temp->type = VALUE_TYPE;
-        temp->pts_name.insert(ret->id);
-        temp->pts = new std::set<PtrNode *>;
-        temp->pts->insert(ret);
+        getReturnFunc(F, gpts_info);
+        std::string temp_id = call_inst->getName();
+        for(auto iter = ipts->second->begin(); iter != ipts->second->end(); ++iter) {
+          if(temp_id.compare((*iter)->id) == 0 ) {
+            PtrNode *temp = *iter;
+            temp->pts_name.insert(global_ret_value[F]->id);
+            temp->pts->insert(global_ret_value[F]);
+            exist = true;
+          }
+        }
+        if(!exist) {
+          PtrNode *temp = new PtrNode;
+          temp->pts = new std::set<PtrNode *>;
+          temp->id = call_inst->getName();
+          temp->type = POINTER_TYPE;
+          temp->pts_name.insert(global_ret_value[F]->id);
+          temp->pts->insert(global_ret_value[F]);
+          ipts->second->insert(temp);
+        }
         computeGPTS(gpts_info);
       }
       computeResult(gpts_info);
     }
   }
-  return 0;
 }
 
 //transfer the arg PtrNode to the called func
@@ -785,6 +831,10 @@ void PTSVisitor::merge(IPTS *dest, IPTS *src) {
           }
         }
         if(!flag) {
+          //outs() << "************dest IPTS:";
+          //dump(dest);
+          //outs() << "************src IPTS:\n";
+          //dump(src);
           errs() << __LINE__ << ": Error008!" << ptr_name << " Can find object PtrNode in the IPTS when merge stage 2.\n";
         }
       }
@@ -803,9 +853,16 @@ void PTSVisitor::dealWithIntrinsicValue(Instruction *curr, std::vector<IPTS *> *
   //The first argument is the new value (wrapped as metadata)
   DILocalVariable *var_meta = cast<DILocalVariable>((cast<MetadataAsValue>(call_intrinsic->getOperand(2) ) )->getMetadata() );
   std::string var_name = var_meta->getName();
+  Metadata *temp = cast<Metadata>(cast<MetadataAsValue>(call_intrinsic->getOperand(0) )->getMetadata() );
+  Value *var_value = cast<ValueAsMetadata>(temp)->getValue();
+  bool is_addr = false;
+  if(var_value->getType()->isPointerTy() ) {
+    if(var_value->getType()->getPointerElementType()->isPointerTy() )
+      is_addr = true;
+  }
   //pointer type
   if( (cast<DIType>(var_meta->getRawType() ) )->getTag() == dwarf::DW_TAG_pointer_type) {        
-    if(var_meta->getArg() == 0) {       //it is a local variable, we have dealed with params at createArgIpts
+    if((var_meta->getArg() == 0) && (!is_addr) ) {       //it is a local variable, we have dealed with params at createArgIpts
       PtrNode *temp_node = new PtrNode;
       temp_node->id = var_name; 
       temp_node->pts = new std::set<PtrNode *>;                  //init as null pts
@@ -826,6 +883,7 @@ void PTSVisitor::dealWithIntrinsicValue(Instruction *curr, std::vector<IPTS *> *
           temp_node->pts_name.insert(var_value_name);
         }
       }
+      //outs() << "create PtrNode " << temp_node->id << " at " << __LINE__ << "\n";
       temp_ipts->second->insert(temp_node);
     }
   }
@@ -882,6 +940,7 @@ void PTSVisitor::dealWithPhi(Instruction *curr, std::vector<IPTS *> *ipts_vec) {
   IPTS *temp_ipts = new IPTS;      //create IPTS for curr inst
   temp_ipts->first = curr;
   temp_ipts->second = new std::set<PtrNode *>;
+  //outs() << "create PtrNode " << temp_node->id << " at " << __LINE__ << "\n";
   temp_ipts->second->insert(temp_node);
   ipts_vec->push_back(temp_ipts);
 }
@@ -1048,7 +1107,7 @@ void PTSVisitor::dealWithLoad(Instruction *curr, std::vector<IPTS *> *ipts_vec) 
   //get alia, alia may be come from an instruction, or from param
   if(Argument *arg = dyn_cast<Argument>(load_inst->getPointerOperand() ) ) {
     alia = param_addr[arg]->alia;
-    arg->dump();
+    //arg->dump();
   }
   else {
     Instruction *alia_index = dyn_cast<Instruction>(load_inst->getPointerOperand() );
@@ -1108,6 +1167,7 @@ void PTSVisitor::dealWithLoad(Instruction *curr, std::vector<IPTS *> *ipts_vec) 
         load_value->pts->insert(gfuncs.find(ptr_name)->second);
       }
     }
+    //outs() << "create PtrNode " << load_value->id << " at " << __LINE__ << "\n";
     temp_ipts->second->insert(load_value);
   }
   else if(base->type == 1) {       //nothing to say, it is not beautiful now
@@ -1147,6 +1207,7 @@ public:
         visitor.computePTS(F, &pts_info);
       }
    }
+   visitor.printCallInstVec();
    visitor.computeGPTS(&pts_info);
    visitor.computeGPTS(&pts_info);
    visitor.interProcedurePTSTransfer(&pts_info);
