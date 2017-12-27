@@ -15,6 +15,7 @@
 #include <vector>
 #include <stack>
 #include <set>
+#include <queue>
 #include <utility>
 #include <string>
 #include<cstdlib>
@@ -700,19 +701,20 @@ void PTSVisitor::getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *g
       continue;
     //complicated, need to compute F's IPTS with real addr
     if(visitParamMemory(F)) {     //now assume there is only one addr param, and it is a alia, not base
-      AddrAlia *arg_alia = NULL;
+      std::queue<AddrAlia *> arg_alia_vec;
       unsigned num = call_inst->getNumArgOperands();
       for(int i = 0; i < num; ++i) {
         Value *arg = call_inst->getArgOperand(i);
         if(isValueAddr(arg) ) {
-          arg_alia = global_alia[cast<Instruction>(arg)];
-          break;
+          arg_alia_vec.push(global_alia[cast<Instruction>(arg)]);
+          //break;
         }
       }
       for(auto iter = F->arg_begin(); iter != F->arg_end(); ++iter) {
         if(isValueAddr(cast<Value>(iter) ) ) {
           param_addr[cast<Argument>(iter)] = new ParamAddr;
-          param_addr[cast<Argument>(iter)]->alia = arg_alia;
+          param_addr[cast<Argument>(iter)]->alia = arg_alia_vec.front();
+          arg_alia_vec.pop();
         }
       }
       computePTS(F, gpts_info);
@@ -911,6 +913,7 @@ void PTSVisitor::dealWithIntrisicDeclare(Instruction *curr, std::vector<IPTS *> 
   CallInst *call_intrinsic = cast<CallInst>(curr);
  //@TODO 
 }
+
 //deal with phi node
 void PTSVisitor::dealWithPhi(Instruction *curr, std::vector<IPTS *> *ipts_vec) {
   //@TODO if it is not the object type PhiNode, we need not to deal with it
@@ -975,6 +978,7 @@ void PTSVisitor::dealWithCall(Instruction *curr, std::vector<IPTS *> *ipts_vec) 
     }
   }
 }
+
 //deal with alloca inst
 void PTSVisitor::dealWithAlloca(Instruction *curr) {
   AllocaInst *alloca = cast<AllocaInst>(curr);
@@ -1070,10 +1074,19 @@ void PTSVisitor::dealWithBitCast(Instruction *curr, std::vector<IPTS *> *ipts_ve
 //deal with store inst
 void PTSVisitor::dealWithStore(Instruction *curr, std::vector<IPTS *> *ipts_vec) {
   StoreInst *store_inst = cast<StoreInst>(curr);
-  Instruction *alia_index = cast<Instruction>(store_inst->getPointerOperand() );
   BaseAddr *base = NULL;
   AddrAlia *alia = NULL;
-  alia = global_alia[alia_index];    //get alia
+  //get alia
+  if(Instruction *alia_index = dyn_cast<Instruction>(store_inst->getPointerOperand() ) ) {
+    alia = global_alia[alia_index];    
+  }
+  else if(Argument *arg = dyn_cast<Argument>(store_inst->getPointerOperand() ) ) {
+    alia = param_addr[arg]->alia;
+  }
+  else {
+    errs() << __LINE__ << ": Error015! store error\n";
+    exit(-1);
+  }
   if(alia != NULL) {                 
     base = alia->base;               //get base
   }
