@@ -191,8 +191,8 @@ public :
 private:
  //
  void createArgIpts(Function *F, IPTS *arg_ipts);
- //chech if a value is addr
- bool isValueAddr(Value *value);
+ //chech if a value is addr, 0 means no, 1 means func **, 2 means struct **
+ int isValueAddr(Value *value);
  //get real arg from called, invokes getArgFromCallInst;
  void getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *gpts_info);
  //get args from a call inst, referrenced by getParamsFromCalled;
@@ -266,8 +266,12 @@ bool PTSVisitor::visitParamMemory(Function *F) {
       if(iter->getType()->getPointerElementType()->isPointerTy() ) {
         return true;
       }
+      if(iter->getType()->getPointerElementType()->isStructTy() ) {
+        return true;
+      }
     }
   }
+  return false;
 }
 
 //get call inst
@@ -485,14 +489,18 @@ void PTSVisitor::computeIPTS(Instruction *curr, std::vector<IPTS *> *ipts_vec) {
 void PTSVisitor::printResult() {
   if(result.empty() )
     return;
+  std::map<int, std::string> format_out;
   for(auto iter = result.begin(); iter != result.end(); ++iter) {
     std::string out;
-    errs() << iter->inst->getDebugLoc()->getLine() << ":";
+    int line = iter->inst->getDebugLoc()->getLine();
     for(auto &it : iter->name) {
       out.append(it).append(", ");
     }
     out.resize(out.length() - 2);
-    errs() << out << "\n";
+    format_out[line] = out;
+  }
+  for(auto iter = format_out.begin(); iter != format_out.end(); ++iter) {
+    outs() << iter->first << " : " << iter->second << "\n";
   }
 }
 
@@ -674,13 +682,15 @@ bool PTSVisitor::getArgFromCallInst(CallInst *call_inst, IPTS *ipts, std::vector
 }
 
 //chech if a value is addr
-bool PTSVisitor::isValueAddr(Value *value) {
+int PTSVisitor::isValueAddr(Value *value) {
   Type *type = value->getType();
   if(type->isPointerTy() ) {
-    if(type->getPointerElementType()->isPointerTy() )
-      return true;
+    if(type->getPointerElementType()->isPointerTy() )     //func ** addr, it is a alia
+      return 1;
+    if(type->getPointerElementType()->isStructTy() )      //struct * addr, it is a base
+      return 2;
   }
-  return false;
+  return 0;
 }
 
 //get real arg from called, invokes getArgFromCallInst;
@@ -702,19 +712,29 @@ void PTSVisitor::getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *g
     //complicated, need to compute F's IPTS with real addr
     if(visitParamMemory(F)) {     //now assume there is only one addr param, and it is a alia, not base
       std::queue<AddrAlia *> arg_alia_vec;
+      std::queue<BaseAddr *> arg_base_vec;
       unsigned num = call_inst->getNumArgOperands();
       for(int i = 0; i < num; ++i) {
         Value *arg = call_inst->getArgOperand(i);
-        if(isValueAddr(arg) ) {
+        if(isValueAddr(arg) == 1) {         //func **
           arg_alia_vec.push(global_alia[cast<Instruction>(arg)]);
-          //break;
+        }
+        else if(isValueAddr(arg) == 2) {    //struct **
+          outs() << "here 1111111111111111111111\n";
+          arg_base_vec.push(global_base[cast<Instruction>(arg)]);
         }
       }
       for(auto iter = F->arg_begin(); iter != F->arg_end(); ++iter) {
-        if(isValueAddr(cast<Value>(iter) ) ) {
+        if(isValueAddr(cast<Value>(iter) ) == 1) {
           param_addr[cast<Argument>(iter)] = new ParamAddr;
           param_addr[cast<Argument>(iter)]->alia = arg_alia_vec.front();
           arg_alia_vec.pop();
+        }
+        else if(isValueAddr(cast<Value>(iter) ) == 2) {
+          outs() << "here 2222222222222222222222\n";
+          param_addr[cast<Argument>(iter)] = new ParamAddr;
+          param_addr[cast<Argument>(iter)]->base = arg_base_vec.front();
+          arg_base_vec.pop();
         }
       }
       computePTS(F, gpts_info);
@@ -1021,8 +1041,16 @@ void PTSVisitor::dealWithGetElementPtr(Instruction *curr) {
     alia->index = cast<ConstantInt>(get_ptr->getOperand(2) )->getZExtValue();
   }
   else if(Argument *arg = dyn_cast<Argument>(temp) ) {    //deal with array as param
-    alia->base = param_addr[arg]->alia->base;
-    alia->index = cast<ConstantInt>(get_ptr->getOperand(1) )->getZExtValue();
+    ParamAddr *temp_param_addr = param_addr[arg];
+    if(temp_param_addr->alia != NULL) {
+    //if( arg->getType()->getPointerElementType()->isPointerTy() ) {
+      alia->base = temp_param_addr->alia->base;
+      alia->index = cast<ConstantInt>(get_ptr->getOperand(1) )->getZExtValue();
+    }
+    else if(temp_param_addr->base != NULL) {
+      alia->base = temp_param_addr->base;
+      alia->index = cast<ConstantInt>(get_ptr->getOperand(2) )->getZExtValue();
+    }
   }
   else {
     errs() << __LINE__ << ": Error014! Unrecongized base in dealWithGetElementPtr\n";
