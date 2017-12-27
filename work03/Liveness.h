@@ -638,23 +638,25 @@ bool PTSVisitor::getArgFromCallInst(CallInst *call_inst, IPTS *ipts, std::vector
   dump(ipts);
   for(int i = 0; i < num; ++i) {
     Value *arg = call_inst->getArgOperand(i);
-    //only need to deal with function pointer parameters
+    //only need to deal with function pointer parameters, do not include addr
     if(arg->getType()->isPointerTy() ) {
-      std::string arg_name = arg->getName();
-      if(arg_name.empty() )    {         //param is unnamed value, like %1
-        arg_name = unnamed_variable_name[cast<Instruction>(arg)];
-      }
-      if(gfuncs.find(arg_name) != gfuncs.end() ) {         //func addr as param
-        args.push_back(gfuncs.find(arg_name)->second);
-        args_index.push_back(i);
-      }
-      else {                                               //func ptr as param
-        outs() << "arg name :" << arg_name << "\n";
-        for(auto it = ipts->second->begin(); it != ipts->second->end(); ++it) {
-          if(arg_name.compare((*it)->id) == 0) {
-            args.push_back(*it);
-            args_index.push_back(i);
-            break;
+      if(!arg->getType()->getPointerElementType()->isPointerTy() ) {        //not addr
+        std::string arg_name = arg->getName();
+        if(arg_name.empty() )    {         //param is unnamed value, like %1
+          arg_name = unnamed_variable_name[cast<Instruction>(arg)];
+        }
+        if(gfuncs.find(arg_name) != gfuncs.end() ) {         //func addr as param
+          args.push_back(gfuncs.find(arg_name)->second);
+          args_index.push_back(i);
+        }
+        else {                                               //func ptr as param
+          outs() << "arg name :" << arg_name << "\n";
+          for(auto it = ipts->second->begin(); it != ipts->second->end(); ++it) {
+            if(arg_name.compare((*it)->id) == 0) {
+              args.push_back(*it);
+              args_index.push_back(i);
+              break;
+            }
           }
         }
       }
@@ -689,8 +691,8 @@ void PTSVisitor::getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *g
   std::vector<PtrNode *> args;                                 //arg list
   std::vector<int> args_index;                                 //arg index
   bool flag = getArgFromCallInst(call_inst, ipts, args, args_index);
-  if(!flag)       //no need to do param transfer
-    return;
+  //if(!flag)       //no need to do param transfer
+  //  return;
   //get real arg from each function call instance
   for(auto func_iter = called_func_set.begin(); func_iter != called_func_set.end(); ++func_iter) {
     Function *F = *func_iter;
@@ -1002,17 +1004,25 @@ void PTSVisitor::dealWithAlloca(Instruction *curr) {
   }
   global_base[curr] = base;
 }
+
 //deal with getElementPtr inst
 void PTSVisitor::dealWithGetElementPtr(Instruction *curr) {
   GetElementPtrInst *get_ptr = cast<GetElementPtrInst>(curr);
   AddrAlia *alia = new AddrAlia;
-  Instruction *base_index = cast<Instruction>(get_ptr->getPointerOperand() );
-  alia->base = global_base[base_index];
-  unsigned index_num = get_ptr->getNumIndices();
-  //@TODO multi-dimention index
-  //the first operand is PointerOperand, and the first index is always 0
-  for(int i = 2; i < index_num + 1; ++i) {
-     alia->index = cast<ConstantInt>(get_ptr->getOperand(i) )->getZExtValue(); 
+  Value *temp = get_ptr->getPointerOperand();
+  if(Instruction *base_index = dyn_cast<Instruction>(temp) ) {
+    //@TODO multi-dimention index, we only deal with one-dimention
+    //the first operand is PointerOperand, and the first index is always 0
+    alia->base = global_base[base_index];
+    alia->index = cast<ConstantInt>(get_ptr->getOperand(2) )->getZExtValue();
+  }
+  else if(Argument *arg = dyn_cast<Argument>(temp) ) {    //deal with array as param
+    alia->base = param_addr[arg]->alia->base;
+    alia->index = cast<ConstantInt>(get_ptr->getOperand(1) )->getZExtValue();
+  }
+  else {
+    errs() << __LINE__ << ": Error014! Unrecongized base in dealWithGetElementPtr\n";
+    exit(-1);
   }
   global_alia[curr] = alia;
 }
