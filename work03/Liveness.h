@@ -667,7 +667,7 @@ void PTSVisitor::getReturnAddr(Function *F, PTSVisitor *gpts_info) {
 //get args from a call inst
 bool PTSVisitor::getArgFromCallInst(CallInst *call_inst, IPTS *ipts, std::vector<PtrNode *> &args, std::vector<int> &args_index) {
   unsigned num = call_inst->getNumArgOperands();
-  dump(ipts);
+  //dump(ipts);
   for(int i = 0; i < num; ++i) {
     Value *arg = call_inst->getArgOperand(i);
     //only need to deal with function pointer parameters, do not include addr
@@ -802,9 +802,8 @@ void PTSVisitor::getParamsFromCalled(CallInst *call_inst, IPTS *ipts, PTSInfo *g
         }
         computeGPTS(gpts_info);
       }
-      //@TODO deal with return addr
       else if(F->getReturnType()->isPointerTy() ) {              //return addr
-
+        //@TODO deal with return addr
       }
       computeResult(gpts_info);
     }
@@ -1271,8 +1270,14 @@ void PTSVisitor::dealWithLoad(Instruction *curr, std::vector<IPTS *> *ipts_vec) 
         if(LoadInst *temp_load = dyn_cast<LoadInst>(store_value) ) {
           ptr_name = unnamed_variable_name[temp_load];
         }
+        else if(ConstantPointerNull *temp = dyn_cast<ConstantPointerNull>(store_value) ) {
+          outs() << "here, 1 points get\n";
+          continue;
+        }
         else {
           errs() << __LINE__ << ": Error004! Unrecongnized load value.\n";
+          store_inst->dump();
+          store_value->dump();
           exit(-1);
         }
       }
